@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+  <title>BhumiDrishti Icon</title>
+  <desc>Circular map pin with terrain contour lines and central eye — BhumiDrishti logo mark</desc>
+
+  <rect width="200" height="200" fill="#ffffff" rx="40"/>
+
+  <g transform="translate(100,95)">
+    <circle cx="0" cy="0" r="72" fill="#0F6E56"/>
+    <circle cx="0" cy="0" r="58" fill="#1D9E75"/>
+
+    <path d="M-56 0 Q-32 -30 0 -34 Q32 -30 56 0" fill="none" stroke="#9FE1CB" stroke-width="2.5" opacity="0.7"/>
+    <path d="M-62 0 Q-36 -40 0 -45 Q36 -40 62 0" fill="none" stroke="#9FE1CB" stroke-width="1.5" opacity="0.38"/>
+    <path d="M-50 14 Q-28 -10 0 -14 Q28 -10 50 14" fill="none" stroke="#9FE1CB" stroke-width="2.0" opacity="0.52"/>
+    <path d="M-44 28 Q-24 10 0 6 Q24 10 44 28" fill="none" stroke="#9FE1CB" stroke-width="1.5" opacity="0.32"/>
+
+    <circle cx="0" cy="0" r="22" fill="#085041"/>
+    <circle cx="0" cy="0" r="14" fill="#E1F5EE"/>
+    <circle cx="0" cy="0" r="7"  fill="#0F6E56"/>
+    <circle cx="-4" cy="-4" r="2.5" fill="#9FE1CB" opacity="0.9"/>
+
+    <path d="M0 72 L-12 50 Q0 42 12 50 Z" fill="#0F6E56"/>
+    <path d="M0 72 L-10 52 Q0 46 10 52 Z" fill="#085041" opacity="0.5"/>
+
+    <line x1="-32" y1="-62" x2="-24" y2="-48" stroke="#9FE1CB" stroke-width="1.8" opacity="0.5"/>
+    <line x1="0"   y1="-70" x2="0"   y2="-54" stroke="#9FE1CB" stroke-width="1.8" opacity="0.5"/>
+    <line x1="32"  y1="-62" x2="24"  y2="-48" stroke="#9FE1CB" stroke-width="1.8" opacity="0.5"/>
+  </g>
+</svg>

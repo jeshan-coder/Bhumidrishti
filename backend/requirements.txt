@@ -1,0 +1,8 @@
+fastapi[all]
+asyncpg
+pydantic==2.*
+geopandas
+rasterio
+Pillow
+python-multipart
+ollama

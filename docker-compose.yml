@@ -1,0 +1,116 @@
+services:
+  postgres:
+    image: postgis/postgis:16-3.4
+    container_name: bhumidrishti_postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=bhumidrishti
+      - POSTGRES_USER=bhumidrishti
+      - POSTGRES_PASSWORD=bhumidrishti
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bhumidrishti -d bhumidrishti"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: ollama-init
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    depends_on:
+      - ollama
+    entrypoint: >
+      /bin/sh -c '
+      set -e;
+      echo "Waiting for Ollama to be ready...";
+      until ollama list > /dev/null 2>&1; do sleep 3; done;
+      ensure_model() {
+        model_name=$$1;
+        if ollama show $$model_name > /dev/null 2>&1; then
+          echo "Model already present, skipping: $$model_name";
+        else
+          echo "Pulling missing model: $$model_name";
+          ollama pull $$model_name;
+        fi
+      };
+      ensure_model gemma4:26b;
+      ensure_model gemma4:31b;
+      ensure_model gemma4:e4b;
+      echo "Model check complete.";
+      '
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: bhumidrishti_backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - ./data:/app/data
+    env_file:
+      - ./backend/.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      gis-loader:
+        condition: service_completed_successfully
+      ollama:
+        condition: service_started
+
+  gis-loader:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: bhumidrishti_gis_loader
+    volumes:
+      - ./backend:/app
+      - ./data:/app/data
+    env_file:
+      - ./backend/.env
+    command: ["bash", "/app/scripts/load_data.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: bhumidrishti_frontend
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      - backend
+
+volumes:
+  ollama_data:
+  postgres_data:
