@@ -6,3 +6,4 @@ rasterio
 Pillow
 python-multipart
 ollama
+httpx

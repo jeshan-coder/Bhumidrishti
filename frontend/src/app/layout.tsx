@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
+import "maplibre-gl/dist/maplibre-gl.css";
 import { cn } from "@/lib/utils";
 import { AppNavbar } from "@/components/app-navbar";
 
@@ -12,6 +13,7 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({
+  children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
@@ -19,6 +21,7 @@ export default function RootLayout({
     <html lang="en" className={cn("font-sans antialiased", inter.variable)}>
       <body>
         <AppNavbar />
+        {children}
       </body>
     </html>
   );

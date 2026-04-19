@@ -1,6 +1,12 @@
 ---
 trigger: always_on
 ---
+
+#Use comment properly . 
+#in top of file use comment to explain what file is for
+#in top of function use comment to explain what function is for
+#in top of class use comment to explain what class is for
+#in top of variable use comment to explain what variable is for
 # BhumiDrishti — Windsurf Rules
 
 ## Project overview
