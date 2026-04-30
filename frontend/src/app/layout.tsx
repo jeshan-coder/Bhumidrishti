@@ -4,6 +4,7 @@ import "./globals.css";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { cn } from "@/lib/utils";
 import { AppNavbar } from "@/components/app-navbar";
+import { Toaster } from "sonner";
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-sans" });
 
@@ -22,6 +23,7 @@ export default function RootLayout({
       <body>
         <AppNavbar />
         {children}
+        <Toaster richColors position="top-right" />
       </body>
     </html>
   );
