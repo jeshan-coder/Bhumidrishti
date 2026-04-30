@@ -180,6 +180,16 @@ class TurkeyBuilding(BaseModel):
     province: str | None = None
 
 
+class TurkeyBuildingQueryResult(BaseModel):
+    """Result payload for turkey_buildings lookup with spatial match metadata."""
+
+    found: bool
+    match_strategy: Literal["contains", "nearest_within_30m", "none"]
+    distance_m: float | None = None
+    building_data: dict[str, Any] | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
 class FloodZone(BaseModel):
     """Flood zone polygon feature (derived from waterway buffer) - complete schema."""
 
@@ -187,6 +197,74 @@ class FloodZone(BaseModel):
     waterway_type: str | None = None
     waterway_name: str | None = None
     province: str | None = None
+
+
+class FloodZoneQueryResult(BaseModel):
+    """Result payload for flood zone point-in-polygon lookup."""
+
+    is_flood_zone: bool
+    flood_zone_data: dict[str, Any] | None = None
+    waterway_type: str | None = None
+    waterway_name: str | None = None
+    distance_to_waterway_m: float | None = None
+    province: str | None = None
+
+
+class LocationInfoQueryResult(BaseModel):
+    """Result payload for location context lookup from province, district, and nearest point layers."""
+
+    found: bool
+    province: str | None = None
+    district: str | None = None
+    province_data: dict[str, Any] | None = None
+    district_data: dict[str, Any] | None = None
+    nearest_point_data: dict[str, Any] | None = None
+    district_distance_m: float | None = None
+    nearest_point_distance_m: float | None = None
+
+
+class NearestRoadQueryResult(BaseModel):
+    """Result payload for nearest-road lookup from turkey_lines highway features."""
+
+    found: bool
+    road_name: str | None = None
+    highway_type: str | None = None
+    highway_description: str | None = None
+    surface: str | None = None
+    distance_m: float | None = None
+    bridge: str | None = None
+    tunnel: str | None = None
+    oneway: str | None = None
+    province: str | None = None
+    road_access: Literal["passable", "foot_only", "unknown"] = "unknown"
+
+
+class OsrmRouteQueryResult(BaseModel):
+    """Result payload for OSRM route lookup between two WGS84 coordinates."""
+
+    found: bool
+    profile: Literal["driving", "walking", "cycling"] = "driving"
+    distance_m: float | None = None
+    duration_s: float | None = None
+    geometry_geojson: dict[str, Any] | None = None
+    start_lon: float | None = None
+    start_lat: float | None = None
+    end_lon: float | None = None
+    end_lat: float | None = None
+    warnings: list[str] = Field(default_factory=list)
+    error: str | None = None
+
+
+class DemElevationQueryResult(BaseModel):
+    """Result payload for DEM elevation lookup at a WGS84 coordinate."""
+
+    found: bool
+    elevation_m: float | None = None
+    slope_degrees: float | None = None
+    slope_risk: Literal["low", "moderate", "high", "unknown"] = "unknown"
+    dem_region: Literal["hatay", "adiyaman", "unknown"] = "unknown"
+    dem_path: str | None = None
+    error: str | None = None
 
 
 class DestroyedBuilding(BaseModel):

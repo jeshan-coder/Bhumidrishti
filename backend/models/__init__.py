@@ -21,6 +21,14 @@ from models.assessment import (
     AssessmentStatus,
     InputType,
 )
+from models.upload import (
+    Upload,
+    UploadCreate,
+    UploadListResponse,
+    FileType,
+    UploadStatus,
+    LocationSource,
+)
 
 __all__ = [
     "ChatMessage",
@@ -42,4 +50,10 @@ __all__ = [
     "AssessmentListResponse",
     "AssessmentStatus",
     "InputType",
+    "Upload",
+    "UploadCreate",
+    "UploadListResponse",
+    "FileType",
+    "UploadStatus",
+    "LocationSource",
 ]
