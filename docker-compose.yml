@@ -65,11 +65,24 @@ services:
     ports:
       - "8001:8000"
     volumes:
+      # DEM elevation data
       - ./data/turkey_data/Adiyaman/dem_data:/data/adiyaman
       - ./data/turkey_data/Hatay/dem_data:/data/hatay
+      # Pre-earthquake satellite / drone imagery (COG)
+      - ./data/turkey_data/Adiyaman:/data/satellite/adiyaman
+      - ./data/turkey_data/Hatay:/data/satellite/hatay
     environment:
       - TITILER_API_DISABLE_STAC=TRUE
       - TITILER_API_DISABLE_MOSAIC=TRUE
+
+  osrm:
+    image: osrm/osrm-backend
+    container_name: bhumidrishti_osrm
+    volumes:
+      - ./data/osrm:/data
+    command: osrm-routed --algorithm mld /data/turkey-latest.osrm
+    ports:
+      - "5000:5000"
 
   backend:
     build:
@@ -81,6 +94,7 @@ services:
     volumes:
       - ./backend:/app
       - ./data:/app/data
+      - ./uploads:/app/data/uploads
     env_file:
       - ./backend/.env
     depends_on:
@@ -91,6 +105,8 @@ services:
       ollama:
         condition: service_started
       titiler:
+        condition: service_started
+      osrm:
         condition: service_started
 
   gis-loader:
