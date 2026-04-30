@@ -15,7 +15,7 @@ GIS_LAYER_TABLES: dict[str, str] = {
     "turkey_districts_pts": "turkey_districts_pts",
     "turkey_buildings": "turkey_buildings",
     "flood_zones": "flood_zones",
-    "destroyed_buildings": "destroyed_buildings",
+    "destroyed_buildings": "assessments",
 }
 
 GIS_LAYER_ALIASES: dict[str, str] = {

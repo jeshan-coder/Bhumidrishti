@@ -75,21 +75,27 @@ async def get_dem_info(region: str) -> dict[str, Any]:
 
 @router.get("/bounds/{region}")
 async def get_dem_bounds(region: str) -> dict[str, Any]:
-    """Get DEM geographic bounds from TiTiler."""
+    """Get DEM geographic bounds — extracted from TiTiler /cog/info."""
     if region not in DEM_FILES:
         raise HTTPException(status_code=404, detail=f"Region {region} not found")
 
     dem_path = DEM_FILES[region]
-    bounds_url = f"{TITILER_URL}/cog/bounds"
+    info_url = f"{TITILER_URL}/cog/info"
     params = {"url": dem_path}
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
-            response = await client.get(bounds_url, params=params)
+            response = await client.get(info_url, params=params)
             response.raise_for_status()
+            info = response.json()
             return {
                 "success": True,
-                "data": response.json(),
+                "data": {
+                    "bounds": info.get("bounds"),
+                    "crs": info.get("crs"),
+                    "width": info.get("width"),
+                    "height": info.get("height"),
+                },
                 "error": None,
             }
         except httpx.HTTPError as exc:
