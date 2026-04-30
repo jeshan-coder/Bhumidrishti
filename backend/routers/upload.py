@@ -514,6 +514,160 @@ async def list_unfinished_uploads(
         return _error(f"Failed to list unfinished uploads: {exc}")
 
 
+# ── GET /uploads/by-location ─────────────────────────────────────────────────
+
+@router.get("/by-location", summary="List unfinished uploads grouped by location")
+async def list_unfinished_uploads_by_location(
+    radius_meters: float = Query(10.0, ge=1.0, le=100.0, description="Radius in meters to consider uploads as same location"),
+    limit: int = Query(100, ge=1, le=500),
+) -> dict[str, Any]:
+    """Return unfinished uploads grouped by geographic location.
+    
+    Uploads within radius_meters of each other are grouped together,
+    allowing multiple photos/videos from the same location to be
+    processed as a single assessment batch.
+    """
+    try:
+        pool = get_pool()
+        if pool is None:
+            return _error("Database not available")
+
+        statuses = ("uploaded", "queued", "processing", "failed")
+        
+        # Use PostGIS to cluster uploads by proximity
+        # ST_ClusterDBSCAN assigns cluster IDs to points within radius
+        sql = """
+            WITH unfinished AS (
+                SELECT 
+                    id, original_filename, saved_path, file_type, mime_type,
+                    file_size_bytes, lat, lon, location_source, gps_accuracy_m,
+                    status, is_analyzed, duration_seconds, frames_extracted,
+                    is_georeferenced, cog_path, bounds_west, bounds_south, bounds_east, bounds_north,
+                    assessment_id, batch_id, parent_upload_id,
+                    error_message, retry_count, worker_name, field_note,
+                    uploaded_at, processing_started_at, processing_done_at, updated_at,
+                    ST_SetSRID(ST_MakePoint(lon, lat), 4326)::geography AS geom
+                FROM uploads
+                WHERE status = ANY($1::text[])
+                  AND COALESCE(is_analyzed, FALSE) = FALSE
+                  AND assessment_id IS NULL
+                  AND lat IS NOT NULL 
+                  AND lon IS NOT NULL
+            ),
+            clustered AS (
+                SELECT 
+                    *,
+                    ST_ClusterDBSCAN(geom, $2, 1) OVER () AS cluster_id
+                FROM unfinished
+            )
+            SELECT 
+                cluster_id,
+                AVG(lat) AS center_lat,
+                AVG(lon) AS center_lon,
+                COUNT(*) AS upload_count,
+                jsonb_agg(
+                    jsonb_build_object(
+                        'id', id,
+                        'original_filename', original_filename,
+                        'saved_path', saved_path,
+                        'file_type', file_type,
+                        'mime_type', mime_type,
+                        'file_size_bytes', file_size_bytes,
+                        'lat', lat,
+                        'lon', lon,
+                        'location_source', location_source,
+                        'gps_accuracy_m', gps_accuracy_m,
+                        'status', status,
+                        'duration_seconds', duration_seconds,
+                        'frames_extracted', frames_extracted,
+                        'is_georeferenced', is_georeferenced,
+                        'worker_name', worker_name,
+                        'field_note', field_note,
+                        'uploaded_at', uploaded_at,
+                        'error_message', error_message,
+                        'retry_count', retry_count
+                    ) ORDER BY uploaded_at DESC
+                ) AS uploads
+            FROM clustered
+            GROUP BY cluster_id
+            ORDER BY upload_count DESC, MAX(uploaded_at) DESC
+            LIMIT $3
+        """
+
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(sql, list(statuses), radius_meters, limit)
+
+        # Format response
+        location_groups = []
+        for row in rows:
+            cluster_id = row["cluster_id"]
+            uploads = row["uploads"]
+            
+            # Determine location name from uploads if available
+            location_name = None
+            if uploads and len(uploads) > 0:
+                first_upload = uploads[0]
+                if first_upload.get("field_note"):
+                    location_name = first_upload["field_note"][:50]
+            
+            location_groups.append({
+                "group_id": f"loc_{cluster_id}" if cluster_id is not None else f"loc_single_{rows.index(row)}",
+                "center_lat": round(float(row["center_lat"]), 6) if row["center_lat"] else None,
+                "center_lon": round(float(row["center_lon"]), 6) if row["center_lon"] else None,
+                "upload_count": row["upload_count"],
+                "location_name": location_name,
+                "uploads": uploads,
+            })
+
+        # Also get uploads without coordinates
+        no_coords_sql = """
+            SELECT 
+                id, original_filename, saved_path, file_type, mime_type,
+                file_size_bytes, lat, lon, status, worker_name, field_note,
+                uploaded_at, error_message, retry_count
+            FROM uploads
+            WHERE status = ANY($1::text[])
+              AND COALESCE(is_analyzed, FALSE) = FALSE
+              AND assessment_id IS NULL
+              AND (lat IS NULL OR lon IS NULL)
+            ORDER BY uploaded_at DESC
+        """
+        
+        async with pool.acquire() as conn:
+            no_coords_rows = await conn.fetch(no_coords_sql, list(statuses))
+        
+        uploads_without_coords = []
+        for row in no_coords_rows:
+            uploads_without_coords.append({
+                "id": row["id"],
+                "original_filename": row["original_filename"],
+                "saved_path": row["saved_path"],
+                "file_type": row["file_type"],
+                "mime_type": row["mime_type"],
+                "file_size_bytes": row["file_size_bytes"],
+                "lat": row["lat"],
+                "lon": row["lon"],
+                "status": row["status"],
+                "worker_name": row["worker_name"],
+                "field_note": row["field_note"],
+                "uploaded_at": row["uploaded_at"],
+                "error_message": row["error_message"],
+                "retry_count": row["retry_count"],
+            })
+
+        return _success({
+            "radius_meters": radius_meters,
+            "location_groups": location_groups,
+            "uploads_without_coords": uploads_without_coords,
+            "total_locations": len(location_groups),
+            "total_uploads_without_coords": len(uploads_without_coords),
+            "total_uploads": sum(g["upload_count"] for g in location_groups) + len(uploads_without_coords),
+        })
+        
+    except Exception as exc:
+        return _error(f"Failed to list uploads by location: {exc}")
+
+
 # ── GET /uploads/{upload_id} ────────────────────────────────────────────────
 
 @router.get("/{upload_id}", summary="Get a single upload record")
