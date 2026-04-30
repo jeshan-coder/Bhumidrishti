@@ -1,11 +1,14 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import maplibregl from "maplibre-gl"
 import { PMTiles, Protocol } from "pmtiles"
-import { Map, MapPin, Route, MapPinned, Building, Droplets, AlertTriangle, Mountain } from "lucide-react"
+import { Map, MapPin, Route, MapPinned, Building, Droplets, AlertTriangle, Mountain, SatelliteDish } from "lucide-react"
+import { useRouter } from "next/navigation"
+import { toast } from "sonner"
 import { FieldMapChatSidebar } from "@/components/maps/field-map-chat-sidebar"
 import { fetchGisLayer, type GeoJsonFeatureCollection, type GisLayerKey } from "@/lib/api/gis-layers"
+import { fetchUnfinishedUploads } from "@/lib/api/uploads"
 
 // This variable holds the shared PMTiles protocol instance for MapLibre.
 const protocol = new Protocol()
@@ -45,6 +48,7 @@ const overlayLayerConfigs: OverlayLayerConfig[] = [
   { key: "flood_zones", label: "Flood Zones", color: "#3B82F6", icon: Droplets },
   { key: "destroyed_buildings", label: "Earthquake Damage", color: "#E24B4A", icon: AlertTriangle },
   { key: "dem", label: "DEM", color: "#8B4513", icon: Mountain, isDEM: true },
+  { key: "satellite_pre", label: "Pre-Earthquake Imagery", color: "#6366F1", icon: SatelliteDish, isDEM: true },
 ]
 
 // This variable builds default layer state map.
@@ -57,6 +61,7 @@ const defaultOverlayLayerState: Record<GisLayerKey, OverlayLayerState> = {
   flood_zones: { visible: false, isLoading: false, featureCount: 0, error: null },
   destroyed_buildings: { visible: false, isLoading: false, featureCount: 0, error: null },
   dem: { visible: false, isLoading: false, featureCount: 0, error: null },
+  satellite_pre: { visible: false, isLoading: false, featureCount: 0, error: null },
 }
 
 // This function returns MapLibre source ID for a given overlay key.
@@ -77,8 +82,8 @@ function getOverlayLayerIds(layerKey: GisLayerKey): { fill: string; line: string
 function applyOverlayVisibility(map: maplibregl.Map, layerKey: GisLayerKey, visible: boolean): void {
   const visibilityValue = visible ? "visible" : "none"
 
-  // Handle DEM raster layers
-  if (layerKey === "dem") {
+  // Handle DEM and satellite raster layers
+  if (layerKey === "dem" || layerKey === "satellite_pre") {
     const regions = ["adiyaman", "hatay"]
     for (const region of regions) {
       const rasterLayerId = `${layerKey}-${region}-raster`
@@ -190,10 +195,14 @@ function addOverlayToMap(
 
 // This component renders the PMTiles basemap with a single-button AI chat sidebar.
 export function FieldMapView() {
+  // This variable handles route navigation from map actions.
+  const router = useRouter()
+
   // This variable references the map container element for MapLibre mount.
   const mapContainerRef = useRef<HTMLDivElement | null>(null)
   const mapInstanceRef = useRef<maplibregl.Map | null>(null)
   const overlayLoadedRef = useRef<Set<GisLayerKey>>(new Set())
+  const hasShownUnfinishedToastRef = useRef(false)
 
   // This variable tracks overlay visibility/loading/count per GIS layer.
   const [overlayStates, setOverlayStates] = useState<Record<GisLayerKey, OverlayLayerState>>(
@@ -202,7 +211,8 @@ export function FieldMapView() {
 
   // This variable tracks chat sidebar open state for responsive layout.
   const [isChatSidebarOpen, setIsChatSidebarOpen] = useState(false)
-  
+  const [unfinishedCount, setUnfinishedCount] = useState(0)
+
   // This variable tracks currently selected feature for highlighting.
   const selectedFeatureRef = useRef<{ source: string; id: string | number } | null>(null)
   const popupRef = useRef<maplibregl.Popup | null>(null)
@@ -236,6 +246,51 @@ export function FieldMapView() {
       }
     })
   }
+
+  // This function routes to assessment page and requests opening unfinished sheet.
+  const goToUnfinishedAssessments = useCallback(() => {
+    router.push("/assessment?openUnfinished=1")
+  }, [router])
+
+  // This effect checks unfinished uploads and shows Sonner in map screen as well.
+  useEffect(() => {
+    let isMounted = true
+
+    const loadUnfinishedUploads = async () => {
+      try {
+        const uploads = await fetchUnfinishedUploads(100)
+        if (!isMounted) {
+          return
+        }
+
+        setUnfinishedCount(uploads.length)
+
+        if (uploads.length > 0 && !hasShownUnfinishedToastRef.current) {
+          toast("You have unfinished assessments", {
+            action: {
+              label: "View",
+              onClick: goToUnfinishedAssessments,
+            },
+          })
+          hasShownUnfinishedToastRef.current = true
+        }
+
+        if (uploads.length === 0) {
+          hasShownUnfinishedToastRef.current = false
+        }
+      } catch {
+        if (isMounted) {
+          setUnfinishedCount(0)
+        }
+      }
+    }
+
+    void loadUnfinishedUploads()
+
+    return () => {
+      isMounted = false
+    }
+  }, [goToUnfinishedAssessments])
 
   // This function initializes the map once and tears it down on unmount.
   useEffect(() => {
@@ -319,11 +374,11 @@ export function FieldMapView() {
       map.addControl(new maplibregl.NavigationControl(), "top-right")
       map.addControl(new maplibregl.ScaleControl(), "bottom-left")
 
-      // Fly to Adiyaman province where building data is located
+      // Fly to requested province coordinates
       map.on("load", () => {
         setTimeout(() => {
           map.flyTo({
-            center: [38.20, 38.05],
+            center: [38.268983, 37.763058],
             zoom: 13,
             duration: 2500,
             essential: true,
@@ -332,25 +387,31 @@ export function FieldMapView() {
       })
 
       // This function creates HTML for popup card from feature properties.
-      const createPopupContent = (properties: Record<string, any>, layerLabel: string): string => {
+      const createPopupContent = (
+        properties: Record<string, unknown>,
+        layerLabel: string,
+        latitude: string,
+        longitude: string
+      ): string => {
         const entries = Object.entries(properties).filter(
           ([key, value]) => value !== null && value !== undefined && value !== "" && key !== "id"
         )
-
-        if (entries.length === 0) {
-          return `<div class="p-3 text-sm text-gray-500">No data available</div>`
-        }
 
         const rows = entries
           .map(
             ([key, value]) => `
             <div class="flex justify-between gap-4 py-1.5 border-b border-gray-100 last:border-0">
               <span class="text-xs font-medium text-gray-600 capitalize">${key.replace(/_/g, " ")}</span>
-              <span class="text-xs text-gray-900 font-semibold">${value}</span>
+              <span class="text-xs text-gray-900 font-semibold">${String(value)}</span>
             </div>
           `
           )
           .join("")
+
+        const detailsSection =
+          rows.length > 0
+            ? rows
+            : `<div class="py-2 text-xs text-gray-500">No additional data available.</div>`
 
         return `
           <div class="min-w-[250px] max-w-[350px]">
@@ -358,7 +419,20 @@ export function FieldMapView() {
               <h3 class="text-sm font-bold text-white">${layerLabel}</h3>
             </div>
             <div class="bg-white px-3 py-2 max-h-[300px] overflow-y-auto">
-              ${rows}
+              <div class="flex items-center justify-between gap-2 py-2 border-b border-gray-200">
+                <div class="flex flex-col">
+                  <span class="text-[10px] font-medium uppercase tracking-wide text-gray-500">Location</span>
+                  <span class="text-xs font-semibold text-gray-900">${latitude}, ${longitude}</span>
+                </div>
+                <button
+                  type="button"
+                  data-copy-location="${latitude}, ${longitude}"
+                  class="rounded-md border border-[#D3D1C7] bg-[#F7F6F2] px-2 py-1 text-[10px] font-semibold text-[#0F6E56] hover:bg-[#ECEAE2]"
+                >
+                  Copy
+                </button>
+              </div>
+              ${detailsSection}
             </div>
           </div>
         `
@@ -392,8 +466,11 @@ export function FieldMapView() {
         const layerLabel = config?.label || "Feature"
 
         // Create and show popup
-        const popupContent = createPopupContent(feature.properties || {}, layerLabel)
-        
+        const latitude = e.lngLat.lat.toFixed(6)
+        const longitude = e.lngLat.lng.toFixed(6)
+        const locationText = `${latitude}, ${longitude}`
+        const popupContent = createPopupContent(feature.properties || {}, layerLabel, latitude, longitude)
+
         // Remove existing popup
         if (popupRef.current) {
           popupRef.current.remove()
@@ -408,6 +485,24 @@ export function FieldMapView() {
           .setLngLat(e.lngLat)
           .setHTML(popupContent)
           .addTo(map)
+
+        const copyButton = popup.getElement().querySelector<HTMLButtonElement>("[data-copy-location]")
+        if (copyButton) {
+          copyButton.addEventListener("click", async (event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            try {
+              await navigator.clipboard.writeText(locationText)
+              copyButton.textContent = "Copied"
+            } catch {
+              copyButton.textContent = "Error"
+            }
+
+            window.setTimeout(() => {
+              copyButton.textContent = "Copy"
+            }, 1200)
+          })
+        }
 
         popup.on("close", () => {
           if (selectedFeatureRef.current && mapInstanceRef.current) {
@@ -435,23 +530,29 @@ export function FieldMapView() {
             const isVisible = overlayStates[config.key].visible
             const regions = ["adiyaman", "hatay"]
 
-            // Add both Adiyaman and Hatay DEM sources and layers
+            // Determine which backend endpoint to use
+            const tileEndpoint = config.key === "satellite_pre"
+              ? `http://localhost:8000/satellite/tiles`
+              : `http://localhost:8000/dem/tiles`
+
+            // Raster opacity — satellite imagery should be fully opaque
+            const rasterOpacity = config.key === "satellite_pre" ? 1.0 : 0.7
+
+            // Add both Adiyaman and Hatay sources and layers
             for (const region of regions) {
               const sourceId = `${config.key}-${region}-source`
               const layerId = `${config.key}-${region}-raster`
 
-              // Add raster source for DEM tiles from backend proxy
               if (!map.getSource(sourceId)) {
                 map.addSource(sourceId, {
                   type: "raster",
-                  tiles: [`http://localhost:8000/dem/tiles/${region}/{z}/{x}/{y}.png`],
+                  tiles: [`${tileEndpoint}/${region}/{z}/{x}/{y}.png`],
                   tileSize: 256,
                   minzoom: 0,
-                  maxzoom: 18,
+                  maxzoom: 20,
                 })
               }
 
-              // Add raster layer
               if (!map.getLayer(layerId)) {
                 map.addLayer({
                   id: layerId,
@@ -461,7 +562,7 @@ export function FieldMapView() {
                     visibility: isVisible ? "visible" : "none",
                   },
                   paint: {
-                    "raster-opacity": 0.7,
+                    "raster-opacity": rasterOpacity,
                   },
                 })
               }
@@ -489,7 +590,7 @@ export function FieldMapView() {
             const layerIds = getOverlayLayerIds(config.key)
             map.on("click", layerIds.fill, handleFeatureClick)
             map.on("click", layerIds.point, handleFeatureClick)
-            
+
             // Change cursor on hover
             map.on("mouseenter", layerIds.fill, () => { map.getCanvas().style.cursor = "pointer" })
             map.on("mouseleave", layerIds.fill, () => { map.getCanvas().style.cursor = "" })
@@ -534,8 +635,23 @@ export function FieldMapView() {
   }, [])
 
   return (
-    <section className="relative h-[calc(100vh-3rem)] w-full overflow-hidden bg-[#FAFAF8]">
-      <div className="h-full w-full" ref={mapContainerRef} />
+    <div className="relative flex h-full w-full flex-col overflow-hidden">
+      <style jsx global>{`
+        .custom-popup .maplibregl-popup-close-button {
+          width: 32px !important;
+          height: 32px !important;
+          font-size: 24px !important;
+          line-height: 32px !important;
+          padding: 0 !important;
+          border-radius: 4px;
+          right: 4px;
+          top: 4px;
+        }
+        .custom-popup .maplibregl-popup-close-button:hover {
+          background-color: rgba(0, 0, 0, 0.1);
+        }
+      `}</style>
+      <div ref={mapContainerRef} className="h-full w-full" />
 
       <aside
         className="absolute bottom-0 left-0 right-0 z-20 border-t border-[#D3D1C7] bg-[#FAFAF8]/95 px-4 py-3 shadow-lg backdrop-blur-sm transition-all duration-300"
@@ -571,21 +687,35 @@ export function FieldMapView() {
                     <config.icon size={14} color={config.color} />
                     {config.label}
                     <span className="text-[10px] text-[#6b7280]">
-                      {layerState.isLoading
-                        ? "..."
-                        : layerState.error
-                          ? "!"
-                          : `(${layerState.featureCount})`}
+                      {layerState.isLoading ? (
+                        <span className="inline-flex items-center" aria-label="Loading layer data">
+                          <span className="h-2.5 w-2.5 animate-spin rounded-full border border-[#6b7280] border-t-transparent" />
+                        </span>
+                      ) : layerState.error ? (
+                        "!"
+                      ) : (
+                        `(${layerState.featureCount})`
+                      )}
                     </span>
                   </span>
                 </button>
               )
             })}
+
+            {unfinishedCount > 0 && (
+              <button
+                type="button"
+                onClick={goToUnfinishedAssessments}
+                className="flex items-center gap-2 rounded-md border border-[#0F6E56] bg-[#0F6E56] px-3 py-1.5 text-xs font-semibold text-white transition-all hover:bg-[#0C614D]"
+              >
+                View unfinished ({unfinishedCount})
+              </button>
+            )}
           </div>
         </div>
       </aside>
 
       <FieldMapChatSidebar isOpen={isChatSidebarOpen} onOpenChange={setIsChatSidebarOpen} />
-    </section>
+    </div>
   )
 }
