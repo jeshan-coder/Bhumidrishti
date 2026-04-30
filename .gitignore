@@ -17,7 +17,11 @@ frontend/.next/
 frontend/out/
 
 # Python
+__pycache__/
+*.py[cod]
+*$py.class
 backend/__pycache__/
+backend/**/__pycache__/
 backend/.pytest_cache/
 backend/.mypy_cache/
 backend/.ruff_cache/
@@ -32,3 +36,5 @@ ollama_data/
 
 # Project data (large/local GIS assets)
 /data/
+
+uploads/
