@@ -31,7 +31,13 @@ type StreamEvent = {
 type StreamCallbacks = {
   onThinking: (text: string) => void
   onToken: (token: string) => void
+  onToolCall?: (toolName: string, args: Record<string, unknown>) => void
   onDone: () => void
+}
+
+// This type defines optional controls for the streaming request lifecycle.
+type StreamRequestOptions = {
+  signal?: AbortSignal
 }
 
 // This variable defines API base URL for browser-side requests.
@@ -94,7 +100,8 @@ function parseStreamEvent(rawEvent: string): StreamEvent | null {
 // This function streams chat response from backend SSE endpoint.
 export async function streamChatRequest(
   messages: ChatMessagePayload[],
-  callbacks: StreamCallbacks
+  callbacks: StreamCallbacks,
+  options?: StreamRequestOptions
 ): Promise<void> {
   callbacks.onThinking("Gemma4 is thinking...")
 
@@ -108,6 +115,7 @@ export async function streamChatRequest(
       messages,
       temperature: 0.2,
     }),
+    signal: options?.signal,
   })
 
   if (!response.ok) {
@@ -122,6 +130,7 @@ export async function streamChatRequest(
   const decoder = new TextDecoder()
   let buffer = ""
   let receivedDoneEvent = false
+  let thinkingBuffer = ""
 
   while (true) {
     const { done, value } = await reader.read()
@@ -142,7 +151,26 @@ export async function streamChatRequest(
 
       if (parsed.event === "thinking" && typeof parsed.data === "object" && parsed.data !== null) {
         const text = (parsed.data as { text?: unknown }).text
-        callbacks.onThinking(typeof text === "string" ? text : "Gemma4 is thinking...")
+        if (typeof text === "string" && text.length > 0) {
+          thinkingBuffer += text
+          callbacks.onThinking(thinkingBuffer)
+        } else {
+          callbacks.onThinking("Gemma4 is thinking...")
+        }
+        continue
+      }
+
+      if (parsed.event === "tool_call" && typeof parsed.data === "object" && parsed.data !== null) {
+        const name = (parsed.data as { name?: unknown }).name
+        const rawArgs = (parsed.data as { arguments?: unknown }).arguments
+        const args =
+          typeof rawArgs === "object" && rawArgs !== null
+            ? (rawArgs as Record<string, unknown>)
+            : {}
+
+        if (typeof name === "string" && callbacks.onToolCall) {
+          callbacks.onToolCall(name, args)
+        }
         continue
       }
 

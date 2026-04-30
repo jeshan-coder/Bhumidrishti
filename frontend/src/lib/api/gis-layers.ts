@@ -11,6 +11,7 @@ export type GisLayerKey =
   | "flood_zones"
   | "destroyed_buildings"
   | "dem"
+  | "satellite_pre"
 
 // This type defines the GeoJSON FeatureCollection shape used by map overlays.
 export type GeoJsonFeatureCollection = FeatureCollection<Geometry, GeoJsonProperties>
