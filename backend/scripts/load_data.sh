@@ -115,10 +115,9 @@ PGPASSWORD="$DB_PASS" psql \
       DROP TABLE IF EXISTS turkey_districts_pts CASCADE;
       DROP TABLE IF EXISTS destroyed_buildings CASCADE;
       DROP TABLE IF EXISTS turkey_buildings CASCADE;
-      DROP TABLE IF EXISTS flood_zones CASCADE;
-      DROP TABLE IF EXISTS assessments CASCADE;"
+      DROP TABLE IF EXISTS flood_zones CASCADE;"
 
-echo "  Done — clean slate"
+echo "  Done — clean slate (assessments preserved)"
 
 # ── Step 3a: Load Adiyaman lines (creates turkey_lines) ──────
 echo ""
@@ -518,55 +517,48 @@ CREATE INDEX IF NOT EXISTS idx_flood_zones_geom
 CREATE INDEX IF NOT EXISTS idx_flood_zones_province
   ON flood_zones(province);
 
--- assessments: empty table written by app at runtime
-DROP TABLE IF EXISTS assessments CASCADE;
+SQL
 
-CREATE TABLE assessments (
-  id                  VARCHAR(20)  PRIMARY KEY,
-  lat                 FLOAT        NOT NULL,
-  lon                 FLOAT        NOT NULL,
-  severity            INTEGER      CHECK (severity BETWEEN 1 AND 5),
-  damage_type         VARCHAR(100),
-  building_type       VARCHAR(100),
-  floors              VARCHAR(20),
-  material            VARCHAR(100),
-  estimated_occupants VARCHAR(20),
-  recommended_action  VARCHAR(200),
-  flood_zone          BOOLEAN      DEFAULT FALSE,
-  slope_degrees       FLOAT,
-  nearest_shelter     VARCHAR(200),
-  shelter_distance_m  FLOAT,
-  road_access         VARCHAR(50),
-  road_name           VARCHAR(200),
-  district            VARCHAR(100),
-  province            VARCHAR(50),
-  confidence          FLOAT        CHECK (confidence BETWEEN 0 AND 1),
-  input_type          VARCHAR(20)  DEFAULT 'ground_photo',
-  worker_name         VARCHAR(100),
-  created_at          TIMESTAMPTZ  DEFAULT NOW(),
-  status              VARCHAR(20)  DEFAULT 'pending',
-  reasoning           TEXT,
-  warnings            JSONB        DEFAULT '[]',
-  turkish_summary     TEXT,
-  photo_path          VARCHAR(500),
-  geom                GEOMETRY(Point, 4326)
-);
+# This variable stores whether assessments table already exists.
+ASSESSMENTS_EXISTS=$(PGPASSWORD="$DB_PASS" psql \
+  -h "$DB_HOST" -p "$DB_PORT" \
+  -U "$DB_USER" -d "$DB_NAME" \
+  -tAc "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='assessments');")
 
-CREATE INDEX IF NOT EXISTS idx_assessments_geom
-  ON assessments USING GIST(geom);
-CREATE INDEX IF NOT EXISTS idx_assessments_severity
-  ON assessments(severity);
-CREATE INDEX IF NOT EXISTS idx_assessments_province
-  ON assessments(province);
-CREATE INDEX IF NOT EXISTS idx_assessments_status
-  ON assessments(status);
-CREATE INDEX IF NOT EXISTS idx_assessments_created_at
-  ON assessments(created_at DESC);
+if [ "$ASSESSMENTS_EXISTS" = "t" ]; then
+  echo "  Preserving existing assessments table and data..."
+else
+  echo "  assessments table missing — creating full schema..."
+  PGPASSWORD="$DB_PASS" psql \
+    -h "$DB_HOST" -p "$DB_PORT" \
+    -U "$DB_USER" -d "$DB_NAME" \
+    -f /app/scripts/create_assessments_table.sql
+fi
+
+# This migration keeps existing assessment rows while ensuring required columns exist.
+PGPASSWORD="$DB_PASS" psql \
+  -h "$DB_HOST" -p "$DB_PORT" \
+  -U "$DB_USER" -d "$DB_NAME" << 'SQL'
+
+ALTER TABLE assessments ADD COLUMN IF NOT EXISTS damage_description TEXT;
+ALTER TABLE assessments ADD COLUMN IF NOT EXISTS structural_risk VARCHAR(50);
+ALTER TABLE assessments ADD COLUMN IF NOT EXISTS building_floors VARCHAR(20);
+ALTER TABLE assessments ADD COLUMN IF NOT EXISTS building_material VARCHAR(100);
+ALTER TABLE assessments ADD COLUMN IF NOT EXISTS occupant_status VARCHAR(50);
+ALTER TABLE assessments ADD COLUMN IF NOT EXISTS action_priority INTEGER;
+ALTER TABLE assessments ADD COLUMN IF NOT EXISTS elevation_m FLOAT;
+ALTER TABLE assessments ADD COLUMN IF NOT EXISTS slope_risk VARCHAR(20);
+ALTER TABLE assessments ADD COLUMN IF NOT EXISTS shelter_type VARCHAR(50);
+ALTER TABLE assessments ADD COLUMN IF NOT EXISTS nearest_road VARCHAR(200);
+ALTER TABLE assessments ADD COLUMN IF NOT EXISTS road_distance_m FLOAT;
+ALTER TABLE assessments ADD COLUMN IF NOT EXISTS province VARCHAR(100);
+ALTER TABLE assessments ADD COLUMN IF NOT EXISTS district VARCHAR(100);
+ALTER TABLE assessments ADD COLUMN IF NOT EXISTS address_note TEXT;
 
 SQL
 
 echo -e "  ${GREEN}flood_zones created${NC}"
-echo -e "  ${GREEN}assessments table created (empty)${NC}"
+echo -e "  ${GREEN}assessments table ready (preserved or created)${NC}"
 
 # ── Step 12: Final summary ────────────────────────────────────
 echo ""

@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
     libgdal-dev \
     libpq-dev \
     postgresql-client \
+    ffmpeg \
     gcc \
     g++ \
     && rm -rf /var/lib/apt/lists/*

@@ -4,11 +4,13 @@ import asyncio
 import base64
 import json
 import logging
-from typing import Any
+import time
+from typing import Any, Awaitable, Callable
 
 import asyncpg
 import ollama
 from prompts.gemma_system_prompt import PHOTO_ASSESSMENT_SYSTEM_PROMPT
+from services.ai_runtime import ACTIVE_GEMMA_MODEL
 from services.gis import (
     query_dem_elevation_by_point,
     query_flood_zone_by_point,
@@ -27,6 +29,19 @@ SYSTEM_PROMPT = PHOTO_ASSESSMENT_SYSTEM_PROMPT
 
 # This variable stores the module logger used for pipeline debugging.
 logger = logging.getLogger(__name__)
+
+
+def _safe_json(data: Any) -> str:
+    """Serialize any payload for logs without crashing logger calls."""
+    try:
+        return json.dumps(data, default=str, ensure_ascii=False)
+    except Exception:
+        return str(data)
+
+
+def _log_agent_event(stage: str, payload: dict[str, Any]) -> None:
+    """Write one structured agent log line with stage and payload."""
+    logger.info("agent_stage=%s payload=%s", stage, _safe_json(payload))
 
 # =============================================================
 # TOOLS
@@ -552,26 +567,56 @@ async def get_nearest_shelter(lat: float, lon: float, db: asyncpg.Connection | a
 
 
 async def dispatch_tool(tool_name: str, tool_args: dict, db) -> dict:
-    logger.info("pipeline.dispatch_tool.started tool=%s args=%s", tool_name, tool_args)
+    _log_agent_event(
+        "dispatch_tool_started",
+        {
+            "tool_name": tool_name,
+            "tool_args": tool_args,
+        },
+    )
     lat = tool_args.get("lat")
     lon = tool_args.get("lon")
-    if tool_name == "get_building_info":
-        result = await get_building_info(lat, lon, db)
-    elif tool_name == "get_flood_zone":
-        result = await get_flood_zone(lat, lon, db)
-    elif tool_name == "get_location_info":
-        result = await get_location_info(lat, lon, db)
-    elif tool_name == "get_nearest_road":
-        result = await get_nearest_road(lat, lon, db)
-    elif tool_name == "get_elevation_slope":
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, get_elevation_slope, lat, lon, None)
-    elif tool_name == "get_nearest_shelter":
-        result = await get_nearest_shelter(lat, lon, db)
-    else:
-        result = {"error": f"Unknown tool: {tool_name}"}
+    # This variable stores monotonic start time for tool timing logs.
+    tool_started_at = time.perf_counter()
 
-    logger.info("pipeline.dispatch_tool.completed tool=%s result=%s", tool_name, result)
+    try:
+        if tool_name == "get_building_info":
+            result = await get_building_info(lat, lon, db)
+        elif tool_name == "get_flood_zone":
+            result = await get_flood_zone(lat, lon, db)
+        elif tool_name == "get_location_info":
+            result = await get_location_info(lat, lon, db)
+        elif tool_name == "get_nearest_road":
+            result = await get_nearest_road(lat, lon, db)
+        elif tool_name == "get_elevation_slope":
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, get_elevation_slope, lat, lon, None)
+        elif tool_name == "get_nearest_shelter":
+            result = await get_nearest_shelter(lat, lon, db)
+        else:
+            result = {"error": f"Unknown tool: {tool_name}"}
+    except Exception as exc:
+        _log_agent_event(
+            "dispatch_tool_failed",
+            {
+                "tool_name": tool_name,
+                "tool_args": tool_args,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+                "elapsed_ms": round((time.perf_counter() - tool_started_at) * 1000, 2),
+            },
+        )
+        raise
+
+    _log_agent_event(
+        "dispatch_tool_completed",
+        {
+            "tool_name": tool_name,
+            "tool_args": tool_args,
+            "result": result,
+            "elapsed_ms": round((time.perf_counter() - tool_started_at) * 1000, 2),
+        },
+    )
     return result
 
 
@@ -598,24 +643,50 @@ async def run_assessment_agent(
     pre_image_path: str | None = None,
     building_type: str | None = None,
     building_floors: str | None = None,
-    model: str = "gemma4:26b"
+    model: str = ACTIVE_GEMMA_MODEL,
+    progress_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
 ) -> dict:
-    logger.info(
-        "pipeline.assessment.started lat=%s lon=%s input_type=%s image_paths=%s pre_image=%s",
-        lat,
-        lon,
-        input_type,
-        len(image_paths),
-        pre_image_path is not None,
+    _log_agent_event(
+        "assessment_started",
+        {
+            "lat": lat,
+            "lon": lon,
+            "input_type": input_type,
+            "image_path_count": len(image_paths),
+            "pre_image_available": pre_image_path is not None,
+            "field_note_present": bool(field_note),
+            "model": model,
+        },
     )
+
+    # This variable stores monotonic start time for full assessment timing.
+    assessment_started_at = time.perf_counter()
 
     all_image_paths = []
     if pre_image_path:
         all_image_paths.append(pre_image_path)
     all_image_paths.extend(image_paths[:5])
 
+    _log_agent_event(
+        "assessment_image_paths_prepared",
+        {
+            "all_image_paths": all_image_paths,
+            "all_image_count": len(all_image_paths),
+            "truncated_to_max_images": len(image_paths) > 5,
+        },
+    )
+
     images_b64 = [encode_image(p) for p in all_image_paths if p]
     images_b64 = [img for img in images_b64 if img] # remove empty strings on failure
+
+    _log_agent_event(
+        "assessment_images_encoded",
+        {
+            "requested_count": len(all_image_paths),
+            "encoded_count": len(images_b64),
+            "encoding_failed_count": max(0, len(all_image_paths) - len(images_b64)),
+        },
+    )
     
     user_prompt = build_user_prompt(
         lat=lat, lon=lon, input_type=input_type, image_count=len(images_b64),
@@ -628,19 +699,70 @@ async def run_assessment_agent(
         {"role": "user", "content": user_prompt, "images": images_b64}
     ]
 
+    _log_agent_event(
+        "assessment_prompt_built",
+        {
+            "user_prompt_preview": user_prompt[:500],
+            "message_count": len(messages),
+        },
+    )
+
     iteration = 0
     max_iterations = 10
     
     while iteration < max_iterations:
         iteration += 1
-        logger.info("pipeline.assessment.iteration.started iteration=%s", iteration)
-        response = ollama.chat(
-            model=model,
-            messages=messages,
-            tools=TOOLS,
-            options={"temperature": 0.1, "num_ctx": 8192}
+        _log_agent_event(
+            "assessment_iteration_started",
+            {
+                "iteration": iteration,
+                "max_iterations": max_iterations,
+                "message_count": len(messages),
+            },
         )
+
+        # This variable stores monotonic iteration start time for debugging slow turns.
+        iteration_started_at = time.perf_counter()
+
+        if progress_callback:
+            await progress_callback(
+                {
+                    "stage": "ai_reasoning",
+                    "progress_percent": min(78, 30 + (iteration * 7)),
+                    "thought": "Gemma is reviewing visual evidence and context.",
+                }
+            )
+
+        try:
+            response = ollama.chat(
+                model=model,
+                messages=messages,
+                tools=TOOLS,
+                options={"temperature": 0.1, "num_ctx": 8192}
+            )
+        except Exception as exc:
+            _log_agent_event(
+                "assessment_chat_failed",
+                {
+                    "iteration": iteration,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "elapsed_ms": round((time.perf_counter() - iteration_started_at) * 1000, 2),
+                },
+            )
+            raise
+
         assistant_message = response.message
+
+        _log_agent_event(
+            "assessment_chat_received",
+            {
+                "iteration": iteration,
+                "assistant_content_preview": (assistant_message.content or "")[:500],
+                "tool_call_count": len(assistant_message.tool_calls or []),
+                "elapsed_ms": round((time.perf_counter() - iteration_started_at) * 1000, 2),
+            },
+        )
         
         messages.append({
             "role": "assistant",
@@ -652,24 +774,98 @@ async def run_assessment_agent(
             for tool_call in assistant_message.tool_calls:
                 tool_name = tool_call.function.name
                 tool_args = tool_call.function.arguments
-                logger.info("pipeline.assessment.tool_call tool=%s args=%s", tool_name, tool_args)
+                _log_agent_event(
+                    "assessment_tool_call",
+                    {
+                        "iteration": iteration,
+                        "tool_name": tool_name,
+                        "tool_args": tool_args,
+                    },
+                )
+
+                if progress_callback:
+                    tool_thought_map = {
+                        "get_building_info": "AI is checking building details from GIS layers.",
+                        "get_flood_zone": "AI is evaluating flood risk context.",
+                        "get_location_info": "AI is resolving district and province context.",
+                        "get_nearest_road": "AI is checking road access for responders.",
+                        "get_elevation_slope": "AI is analyzing elevation and terrain slope.",
+                        "get_nearest_shelter": "AI is finding nearest shelter route context.",
+                    }
+                    await progress_callback(
+                        {
+                            "stage": "tool_call",
+                            "progress_percent": min(82, 35 + (iteration * 6)),
+                            "thought": tool_thought_map.get(tool_name, f"AI is calling {tool_name}."),
+                        }
+                    )
+
                 tool_result = await dispatch_tool(tool_name, tool_args, db)
-                logger.info("pipeline.assessment.tool_result tool=%s result=%s", tool_name, tool_result)
+                _log_agent_event(
+                    "assessment_tool_result",
+                    {
+                        "iteration": iteration,
+                        "tool_name": tool_name,
+                        "tool_result": tool_result,
+                    },
+                )
                 messages.append({
                     "role": "tool",
                     "content": json.dumps(tool_result, ensure_ascii=False)
                 })
+
+            _log_agent_event(
+                "assessment_iteration_continue",
+                {
+                    "iteration": iteration,
+                    "reason": "tool_calls_present",
+                    "elapsed_ms": round((time.perf_counter() - iteration_started_at) * 1000, 2),
+                },
+            )
             continue
 
+        if progress_callback:
+            await progress_callback(
+                {
+                    "stage": "finalize_output",
+                    "progress_percent": 84,
+                    "thought": "AI is finalizing structured assessment output.",
+                }
+            )
+
         parsed_assessment = parse_assessment_json(assistant_message.content or "")
-        logger.info("pipeline.assessment.completed iteration=%s severity=%s", iteration, parsed_assessment.get("severity"))
+        _log_agent_event(
+            "assessment_completed",
+            {
+                "iteration": iteration,
+                "severity": parsed_assessment.get("severity"),
+                "damage_type": parsed_assessment.get("damage_type"),
+                "recommended_action": parsed_assessment.get("recommended_action"),
+                "confidence": parsed_assessment.get("confidence"),
+                "elapsed_ms_total": round((time.perf_counter() - assessment_started_at) * 1000, 2),
+            },
+        )
         return parsed_assessment
     
+    _log_agent_event(
+        "assessment_failed_max_iterations",
+        {
+            "max_iterations": max_iterations,
+            "elapsed_ms_total": round((time.perf_counter() - assessment_started_at) * 1000, 2),
+        },
+    )
     raise ValueError(f"Agent loop exceeded {max_iterations} iterations without final response")
 
 
 def parse_assessment_json(raw: str) -> dict:
     import re
+    _log_agent_event(
+        "parse_assessment_started",
+        {
+            "raw_preview": raw[:500],
+            "raw_length": len(raw),
+        },
+    )
     text = raw.strip()
     text = re.sub(r"```json\s*", "", text)
     text = re.sub(r"```\s*", "", text)
@@ -677,6 +873,12 @@ def parse_assessment_json(raw: str) -> dict:
     start = text.find("{")
     end = text.rfind("}") + 1
     if start == -1 or end == 0:
+        _log_agent_event(
+            "parse_assessment_failed_no_json",
+            {
+                "text_preview": text[:500],
+            },
+        )
         raise ValueError(f"No JSON object found in response: {text[:200]}")
     
     json_str = text[start:end]
@@ -686,7 +888,23 @@ def parse_assessment_json(raw: str) -> dict:
     try:
         data = json.loads(json_str)
     except json.JSONDecodeError as e:
+        _log_agent_event(
+            "parse_assessment_failed_invalid_json",
+            {
+                "error": str(e),
+                "json_preview": json_str[:500],
+            },
+        )
         raise ValueError(f"JSON parse error: {e}\\nRaw: {json_str[:500]}")
+
+    if not isinstance(data, dict):
+        _log_agent_event(
+            "parse_assessment_failed_not_object",
+            {
+                "parsed_type": type(data).__name__,
+            },
+        )
+        raise ValueError("Parsed assessment must be a JSON object")
     
     defaults = {
         "severity": 3, "damage_type": "unknown", "damage_description": "Assessment incomplete",
@@ -695,11 +913,26 @@ def parse_assessment_json(raw: str) -> dict:
         "recommended_action": "structural_assessment", "action_priority": 2, "road_access": "unknown",
         "reasoning": "Automated assessment", "warnings": [], "confidence": 0.5, "turkish_summary": ""
     }
+    # This variable tracks fields auto-filled from defaults for debugging weak model outputs.
+    defaulted_fields: list[str] = []
     for key, default in defaults.items():
         if key not in data or data[key] is None:
             data[key] = default
+            defaulted_fields.append(key)
 
     data["severity"] = max(1, min(5, int(data["severity"])))
     data["action_priority"] = max(1, min(5, int(data["action_priority"])))
     data["confidence"] = max(0.0, min(1.0, float(data["confidence"])))
+
+    _log_agent_event(
+        "parse_assessment_completed",
+        {
+            "defaulted_fields": defaulted_fields,
+            "severity": data.get("severity"),
+            "damage_type": data.get("damage_type"),
+            "recommended_action": data.get("recommended_action"),
+            "confidence": data.get("confidence"),
+            "keys": sorted(list(data.keys())),
+        },
+    )
     return data

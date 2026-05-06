@@ -286,6 +286,84 @@ async def list_assessments(
     except Exception as exc:
         return _error_response(f"Failed to fetch assessments: {exc}")
 
+
+# This endpoint returns building polygons matched to assessment points.
+@router.get("/building-layer")
+async def get_assessment_building_layer(
+    limit: int = Query(500, ge=1, le=5000),
+    status: str | None = Query(None),
+) -> dict[str, Any]:
+    pool = get_pool()
+    if not pool:
+        return _error_response("Database pool not initialized")
+
+    where_clause = "WHERE a.status = $2 AND a.geom IS NOT NULL" if status else "WHERE a.geom IS NOT NULL"
+    query = f"""
+        SELECT jsonb_build_object(
+            'type', 'FeatureCollection',
+            'features', COALESCE(jsonb_agg(feature_row.feature), '[]'::jsonb)
+        ) AS geojson
+        FROM (
+            SELECT DISTINCT ON (a.id)
+                jsonb_build_object(
+                    'type', 'Feature',
+                    'id', a.id,
+                    'geometry', ST_AsGeoJSON(a.geom)::jsonb,
+                    'properties', jsonb_build_object(
+                        'id', a.id,
+                        'lat', a.lat,
+                        'lon', a.lon,
+                        'input_type', a.input_type,
+                        'photo_path', a.photo_path,
+                        'severity', a.severity,
+                        'damage_type', a.damage_type,
+                        'structural_risk', a.structural_risk,
+                        'building_type', a.building_type,
+                        'recommended_action', a.recommended_action,
+                        'action_priority', a.action_priority,
+                        'status', a.status,
+                        'created_at', a.created_at,
+                        'updated_at', a.updated_at
+                    )
+                ) AS feature
+            FROM assessments AS a
+            {where_clause}
+            ORDER BY a.id, a.created_at DESC
+            LIMIT $1
+        ) AS feature_row
+    """
+    args = [limit, status] if status else [limit]
+
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(query, *args)
+            if row is None:
+                return _success_response({
+                    "feature_count": 0,
+                    "geojson": {
+                        "type": "FeatureCollection",
+                        "features": [],
+                    },
+                })
+
+            geojson_payload = row.get("geojson")
+            features: list[Any] = []
+            if isinstance(geojson_payload, dict):
+                raw_features = geojson_payload.get("features")
+                if isinstance(raw_features, list):
+                    features = raw_features
+
+            return _success_response(
+                {
+                    "feature_count": len(features),
+                    "geojson": geojson_payload
+                    if isinstance(geojson_payload, dict)
+                    else {"type": "FeatureCollection", "features": []},
+                }
+            )
+    except Exception as exc:
+        return _error_response(f"Failed to fetch assessment building layer: {exc}")
+
 @router.get("/{assessment_id}")
 async def get_assessment(assessment_id: str) -> dict[str, Any]:
     pool = get_pool()

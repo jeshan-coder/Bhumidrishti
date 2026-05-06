@@ -71,6 +71,8 @@ services:
       # Pre-earthquake satellite / drone imagery (COG)
       - ./data/turkey_data/Adiyaman:/data/satellite/adiyaman
       - ./data/turkey_data/Hatay:/data/satellite/hatay
+      # Post-earthquake uploaded orthophotos (COG)
+      - ./uploads:/data/uploads
     environment:
       - TITILER_API_DISABLE_STAC=TRUE
       - TITILER_API_DISABLE_MOSAIC=TRUE

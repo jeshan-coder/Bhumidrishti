@@ -108,6 +108,9 @@ class UploadCreate(BaseModel):
     lon: float | None = None
     location_source: LocationSource = "device_gps"
     gps_accuracy_m: float | None = None
+    # Video metadata (optional)
+    duration_seconds: float | None = None
+    frames_extracted: int | None = None
     worker_name: str | None = None
     field_note: str | None = None
     # Orthophoto extras (optional)

@@ -10,6 +10,8 @@ export type GisLayerKey =
   | "turkey_buildings"
   | "flood_zones"
   | "destroyed_buildings"
+  | "assessments"
+  | "post_earthquake_images"
   | "dem"
   | "satellite_pre"
 

@@ -10,12 +10,23 @@ import {
   ImageIcon,
   Loader2,
   MapPin,
+  Play,
   Plus,
+  RotateCcw,
   Upload,
   X,
 } from "lucide-react"
 import { toast } from "sonner"
-import { fetchUnfinishedUploads, triggerUploadAnalysis, type UnfinishedUploadItem } from "@/lib/api/uploads"
+import {
+  cancelUploadAnalysis,
+  fetchOngoingAssessments,
+  fetchUnfinishedUploadsByLocation,
+  retryUploadAnalysis,
+  triggerLocationBatchAnalysis,
+  type LocationGroup,
+  type OngoingAssessmentItem,
+  type UnfinishedUploadItem,
+} from "@/lib/api/uploads"
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -236,24 +247,65 @@ export default function AssessmentPage() {
   const [useSameLocationForBatch, setUseSameLocationForBatch] = useState(true)
   // This variable stores the most recent confirmed batch coordinate for auto-fill.
   const [sharedBatchCoord, setSharedBatchCoord] = useState<SharedBatchCoord | null>(null)
-  const [unfinishedUploads, setUnfinishedUploads] = useState<UnfinishedUploadItem[]>([])
-  const [isUnfinishedSheetOpen, setIsUnfinishedSheetOpen] = useState(searchParams.get("openUnfinished") === "1")
+  // Location-grouped unfinished uploads state
+  const [locationGroups, setLocationGroups] = useState<LocationGroup[]>([])
+  const [uploadsWithoutCoords, setUploadsWithoutCoords] = useState<UnfinishedUploadItem[]>([])
+  const [ongoingAssessments, setOngoingAssessments] = useState<OngoingAssessmentItem[]>([])
+  const [isUnfinishedSheetOpen, setIsUnfinishedSheetOpen] = useState(false)
   const [isUnfinishedLoading, setIsUnfinishedLoading] = useState(false)
-  const [actioningUploadId, setActioningUploadId] = useState<string | null>(null)
+  // This variable stores a page-level orthophoto upload error message for clear user feedback.
+  const [orthophotoUploadError, setOrthophotoUploadError] = useState<string | null>(null)
+  const [actioningGroupId, setActioningGroupId] = useState<string | null>(null)
+  // This variable tracks per-upload action loading state for cancel/retry buttons.
+  const [analysisActionByUploadId, setAnalysisActionByUploadId] = useState<Record<string, "cancel" | "retry" | null>>({})
   const hasShownUnfinishedToastRef = useRef(false)
+  const hasHandledOpenUnfinishedRef = useRef(false)
+  // This variable stores last notified terminal progress signature per upload to avoid duplicate toasts.
+  const notifiedTerminalProgressRef = useRef<Record<string, string>>({})
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   const needsCoord = NEEDS_COORD.includes(mode)
 
-  // This function fetches unfinished uploads and updates local UI state.
-  async function refreshUnfinishedUploads(showErrorToast = false) {
-    setIsUnfinishedLoading(true)
+  // This function fetches unfinished uploads grouped by location and updates local UI state.
+  async function refreshUnfinishedUploads(showErrorToast = false, silent = false) {
+    if (!silent) {
+      setIsUnfinishedLoading(true)
+    }
     try {
-      const uploads = await fetchUnfinishedUploads(100)
-      setUnfinishedUploads(uploads)
+      const [groupedData, ongoingItems] = await Promise.all([
+        fetchUnfinishedUploadsByLocation(10, 100),
+        fetchOngoingAssessments(),
+      ])
 
-      if (uploads.length > 0 && !hasShownUnfinishedToastRef.current) {
-        toast("You have unfinished assessments", {
+      setLocationGroups(groupedData.location_groups ?? [])
+      setUploadsWithoutCoords(groupedData.uploads_without_coords ?? [])
+      setOngoingAssessments(ongoingItems ?? [])
+
+      // This variable identifies terminal progress events that should trigger one-time UI notifications.
+      const terminalItems = (ongoingItems ?? []).filter(
+        (item) => !item.is_active && (item.status === "done" || item.status === "failed")
+      )
+
+      for (const terminalItem of terminalItems) {
+        const terminalKey = `${terminalItem.status}|${terminalItem.assessment_id ?? ""}|${terminalItem.updated_at ?? ""}`
+        if (notifiedTerminalProgressRef.current[terminalItem.upload_id] === terminalKey) {
+          continue
+        }
+        notifiedTerminalProgressRef.current[terminalItem.upload_id] = terminalKey
+
+        const uploadLabel = terminalItem.original_filename ?? terminalItem.upload_id
+        if (terminalItem.status === "done") {
+          const assessmentSuffix = terminalItem.assessment_id ? ` (${terminalItem.assessment_id})` : ""
+          toast(`Assessment completed for ${uploadLabel}${assessmentSuffix}`)
+        } else {
+          toast(terminalItem.error_message || `Assessment failed for ${uploadLabel}`)
+        }
+      }
+
+      const totalPending = groupedData.total_uploads || 0
+      
+      if (totalPending > 0 && !hasShownUnfinishedToastRef.current) {
+        toast(`You have ${totalPending} unfinished assessment${totalPending > 1 ? 's' : ''} at ${groupedData.total_locations} location${groupedData.total_locations > 1 ? 's' : ''}`, {
           action: {
             label: "View",
             onClick: () => setIsUnfinishedSheetOpen(true),
@@ -262,16 +314,47 @@ export default function AssessmentPage() {
         hasShownUnfinishedToastRef.current = true
       }
 
-      if (uploads.length === 0) {
+      if (totalPending === 0) {
         hasShownUnfinishedToastRef.current = false
       }
-    } catch (error) {
+    } catch {
       if (showErrorToast) {
         toast("Failed to load unfinished assessments")
       }
-      void error
     } finally {
-      setIsUnfinishedLoading(false)
+      if (!silent) {
+        setIsUnfinishedLoading(false)
+      }
+    }
+  }
+
+  // This function requests cancellation for one active upload analysis.
+  async function handleCancelUploadAnalysis(uploadId: string) {
+    setAnalysisActionByUploadId((prev) => ({ ...prev, [uploadId]: "cancel" }))
+    try {
+      await cancelUploadAnalysis(uploadId)
+      toast("Analysis cancellation requested")
+      await refreshUnfinishedUploads(false)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to cancel analysis"
+      toast(message)
+    } finally {
+      setAnalysisActionByUploadId((prev) => ({ ...prev, [uploadId]: null }))
+    }
+  }
+
+  // This function retries analysis for one upload.
+  async function handleRetryUploadAnalysis(uploadId: string) {
+    setAnalysisActionByUploadId((prev) => ({ ...prev, [uploadId]: "retry" }))
+    try {
+      await retryUploadAnalysis(uploadId)
+      toast("Analysis retry started")
+      await refreshUnfinishedUploads(false)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to retry analysis"
+      toast(message)
+    } finally {
+      setAnalysisActionByUploadId((prev) => ({ ...prev, [uploadId]: null }))
     }
   }
 
@@ -282,51 +365,112 @@ export default function AssessmentPage() {
 
   // This effect opens unfinished sheet when requested via query parameter.
   useEffect(() => {
+    if (hasHandledOpenUnfinishedRef.current) {
+      return
+    }
     if (searchParams.get("openUnfinished") === "1") {
+      hasHandledOpenUnfinishedRef.current = true
       setIsUnfinishedSheetOpen(true)
+      const currentUrl = new URL(window.location.href)
+      currentUrl.searchParams.delete("openUnfinished")
+      window.history.replaceState({}, "", currentUrl.toString())
     }
   }, [searchParams])
 
-  // This function returns whether an upload can be manually triggered from sheet.
-  function canTriggerUpload(status: string): boolean {
-    return status === "uploaded" || status === "failed"
+  // This effect refreshes data when sidebar opens
+  useEffect(() => {
+    if (isUnfinishedSheetOpen) {
+      void refreshUnfinishedUploads(false)
+    }
+  }, [isUnfinishedSheetOpen])
+
+  // This variable indicates whether any upload currently has active AI analysis.
+  const hasAnyActiveAnalysis =
+    ongoingAssessments.some((item) => item.is_active) ||
+    locationGroups.some((group) => group.uploads.some((upload) => upload.analysis_active))
+
+  // This variable normalizes ongoing analysis items for the main page section.
+  const mainPageOngoingItems = ongoingAssessments.some((item) => item.is_active)
+    ? ongoingAssessments
+        .filter((item) => item.is_active)
+        .map((item) => ({
+      key: item.upload_id,
+      uploadId: item.upload_id,
+      name: item.original_filename ?? item.upload_id,
+      progressPercent: item.progress_percent ?? 0,
+      thought: item.thought ?? "AI is analyzing uploaded images.",
+      isActive: item.is_active,
+    }))
+    : locationGroups.flatMap((group) =>
+        group.uploads
+          .filter((upload) => upload.analysis_active)
+          .map((upload) => ({
+            key: upload.id,
+            uploadId: upload.id,
+            name: upload.original_filename ?? upload.id,
+            progressPercent: upload.progress_percent ?? 0,
+            thought: upload.analysis_thought ?? "AI is analyzing photos...",
+            isActive: Boolean(upload.analysis_active),
+          }))
+      )
+
+  // This effect keeps live progress in sync while analysis is active.
+  useEffect(() => {
+    if (!hasAnyActiveAnalysis) {
+      return
+    }
+
+    const intervalId = setInterval(() => {
+      void refreshUnfinishedUploads(false, true)
+    }, 2500)
+
+    return () => clearInterval(intervalId)
+  }, [hasAnyActiveAnalysis])
+
+  // This function returns whether a location group can be manually triggered.
+  function canTriggerGroup(group: LocationGroup): boolean {
+    return group.uploads.some((u) => u.status === "uploaded" || u.status === "failed" || (u.status === "processing" && !u.analysis_active))
   }
 
-  // This function returns action button text for manual status transitions.
-  function getActionLabel(status: string): string {
-    if (status === "failed") {
-      return "Retry"
+  // This function returns action button text for location group.
+  function getGroupActionLabel(group: LocationGroup): string {
+    const actionableCount = group.uploads.filter((u) => u.status === "uploaded" || u.status === "failed" || (u.status === "processing" && !u.analysis_active)).length
+    const processingCount = group.uploads.filter((u) => u.analysis_active).length
+    const doneCount = group.uploads.filter((u) => u.status === "done").length
+
+    if (actionableCount > 0) {
+      return `Assess ${group.upload_count} Photo${group.upload_count > 1 ? 's' : ''}`
     }
-    if (status === "uploaded") {
-      return "Start Assessment"
+    if (processingCount > 0) {
+      return "Analyzing..."
     }
-    if (status === "queued") {
-      return "Queued"
-    }
-    if (status === "processing") {
-      return "Processing"
-    }
-    if (status === "done") {
+    if (doneCount === group.upload_count) {
       return "Completed"
     }
-    if (status === "skipped") {
-      return "Skipped"
-    }
-    return "Open"
+    return "Processing"
   }
 
-  // This function triggers backend analysis for one unfinished upload.
-  async function handleTriggerFromSheet(uploadId: string) {
-    setActioningUploadId(uploadId)
+  // This function triggers batch analysis for all uploads at a location.
+  async function handleTriggerLocationGroup(group: LocationGroup) {
+    setActioningGroupId(group.group_id)
     try {
-      await triggerUploadAnalysis(uploadId)
-      toast("Assessment processing started")
+      const uploadIds = group.uploads
+        .filter((u) => u.status === "uploaded" || u.status === "failed" || (u.status === "processing" && !u.analysis_active))
+        .map((u) => u.id)
+
+      if (uploadIds.length === 0) {
+        toast("No actionable uploads in this group")
+        return
+      }
+
+      const result = await triggerLocationBatchAnalysis(uploadIds)
+      toast(`Started analysis for ${result.started} upload${result.started > 1 ? 's' : ''} at this location`)
       await refreshUnfinishedUploads(false)
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to trigger analysis"
       toast(message)
     } finally {
-      setActioningUploadId(null)
+      setActioningGroupId(null)
     }
   }
 
@@ -359,6 +503,7 @@ export default function AssessmentPage() {
   }
 
   function addFiles(fileList: FileList | File[]) {
+    setOrthophotoUploadError(null)
     const templateCoord = useSameLocationForBatch ? sharedBatchCoord : null
     const incoming: ManagedFile[] = Array.from(fileList).map((file, i) => ({
       id: `${file.name}-${file.lastModified}-${i}-${Math.random().toString(36).slice(2)}`,
@@ -476,6 +621,11 @@ export default function AssessmentPage() {
       )
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Upload failed"
+      if (mode === "orthophoto") {
+        const pageErrorMessage = `${f.name}: ${msg}`
+        setOrthophotoUploadError(pageErrorMessage)
+        toast(pageErrorMessage)
+      }
       setFiles((prev) =>
         prev.map((x) => x.id === f.id ? { ...x, status: "error", errorMsg: msg } : x)
       )
@@ -483,6 +633,7 @@ export default function AssessmentPage() {
   }
 
   async function handleUploadAll() {
+    setOrthophotoUploadError(null)
     const pending = files.filter((f) => f.status === "pending" || f.status === "error")
     for (const f of pending) await uploadOne(f)
   }
@@ -507,6 +658,75 @@ export default function AssessmentPage() {
             One location can be reused across many photos. Upload is blocked until all files have coordinates.
           </p>
         </div>
+
+        {/* Ongoing analysis on main page */}
+        {mainPageOngoingItems.length > 0 && (
+          <div className="mb-4 rounded-2xl border border-[#A7D4C5] bg-[#EBF6F2] p-3.5">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <p className="text-sm font-bold text-[#0E5B47]">Ongoing analysis</p>
+              <span className="rounded-full bg-[#CBE9DF] px-2 py-0.5 text-[10px] font-bold text-[#0E5B47]">
+                {mainPageOngoingItems.length} live
+              </span>
+            </div>
+
+            <div className="space-y-2">
+              {mainPageOngoingItems.map((item) => {
+                const safeProgress = Math.max(0, Math.min(100, item.progressPercent))
+                return (
+                  <div key={item.key} className="rounded-xl border border-[#D3D1C7] bg-white px-3 py-2.5">
+                    <div className="mb-1 flex items-center justify-between gap-2">
+                      <p className="truncate text-xs font-semibold text-[#17352b]">
+                        {item.name}
+                      </p>
+                      <span className="text-[11px] font-semibold text-[#0F6E56]">{safeProgress}%</span>
+                    </div>
+
+                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#E5E7EB]">
+                      <div
+                        className="h-full rounded-full bg-[#0F6E56] transition-all duration-500"
+                        style={{ width: `${safeProgress}%` }}
+                      />
+                    </div>
+
+                    <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-[#0F6E56]">
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      <span className="truncate">{item.thought}</span>
+                    </div>
+
+                    <div className="mt-2 flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => void handleCancelUploadAnalysis(item.uploadId)}
+                        disabled={!item.isActive || analysisActionByUploadId[item.uploadId] !== null}
+                        className="inline-flex h-6 items-center gap-1 rounded-md border border-[#D3D1C7] bg-white px-2 text-[10px] font-semibold text-[#6B7280] hover:bg-[#F3F4F6] disabled:opacity-50"
+                      >
+                        {analysisActionByUploadId[item.uploadId] === "cancel" ? (
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                        ) : (
+                          <X className="h-3 w-3" />
+                        )}
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleRetryUploadAnalysis(item.uploadId)}
+                        disabled={analysisActionByUploadId[item.uploadId] !== null}
+                        className="inline-flex h-6 items-center gap-1 rounded-md bg-[#0F6E56] px-2 text-[10px] font-semibold text-white hover:bg-[#0C614D] disabled:opacity-60"
+                      >
+                        {analysisActionByUploadId[item.uploadId] === "retry" ? (
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                        ) : (
+                          <RotateCcw className="h-3 w-3" />
+                        )}
+                        Retry
+                      </button>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
 
         {/* ── Mode selector ───────────────────────────────────────────────── */}
         <div className="grid gap-2 md:grid-cols-3">
@@ -569,6 +789,17 @@ export default function AssessmentPage() {
             onChange={(e) => { if (e.target.files?.length) addFiles(e.target.files); e.target.value = "" }}
           />
         </div>
+
+        {/* Orthophoto upload error banner */}
+        {mode === "orthophoto" && orthophotoUploadError && (
+          <div className="mt-3 flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5">
+            <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0 text-red-600" />
+            <div>
+              <p className="text-xs font-semibold text-red-700">Orthophoto upload failed</p>
+              <p className="text-xs text-red-600">{orthophotoUploadError}</p>
+            </div>
+          </div>
+        )}
 
         {needsCoord && files.length > 0 && (
           <label className="mt-3 inline-flex items-center gap-2 rounded-lg border border-[#D3D1C7] bg-white px-3 py-2 text-xs text-[#17352b]">
@@ -805,66 +1036,207 @@ export default function AssessmentPage() {
               {isUnfinishedLoading ? "Refreshing..." : "Refresh"}
             </button>
 
-            <div className="max-h-[calc(100%-7rem)] space-y-2 overflow-y-auto pr-1">
-              {unfinishedUploads.length === 0 ? (
+            <div className="max-h-[calc(100%-7rem)] space-y-3 overflow-y-auto pr-1">
+              {/* Debug info - always visible during testing */}
+              {mainPageOngoingItems.length > 0 && (
+                <div className="rounded-xl border border-[#A7D4C5] bg-[#EBF6F2] p-3">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <p className="text-xs font-semibold text-[#0E5B47]">Ongoing AI analysis</p>
+                    <span className="rounded-full bg-[#CBE9DF] px-2 py-0.5 text-[10px] font-bold text-[#0E5B47]">
+                      {mainPageOngoingItems.length}
+                    </span>
+                  </div>
+                  <div className="space-y-2">
+                    {mainPageOngoingItems.map((item) => {
+                      const safeProgress = Math.max(0, Math.min(100, item.progressPercent))
+                      return (
+                        <div key={item.uploadId} className="rounded-lg border border-[#D3D1C7] bg-white px-2.5 py-2">
+                          <div className="mb-1 flex items-center justify-between gap-2">
+                            <p className="truncate text-[11px] font-semibold text-[#17352b]">
+                              {item.name}
+                            </p>
+                            <span className="text-[10px] font-semibold text-[#0F6E56]">{safeProgress}%</span>
+                          </div>
+                          <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#E5E7EB]">
+                            <div
+                              className="h-full rounded-full bg-[#0F6E56] transition-all duration-500"
+                              style={{ width: `${safeProgress}%` }}
+                            />
+                          </div>
+                          <p className="mt-1 text-[10px] text-[#0F6E56]">
+                            {item.thought}
+                          </p>
+                          <div className="mt-1.5 flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => void handleCancelUploadAnalysis(item.uploadId)}
+                              disabled={!item.isActive || analysisActionByUploadId[item.uploadId] !== null}
+                              className="inline-flex h-6 items-center gap-1 rounded-md border border-[#D3D1C7] bg-white px-2 text-[10px] font-semibold text-[#6B7280] hover:bg-[#F3F4F6] disabled:opacity-50"
+                            >
+                              {analysisActionByUploadId[item.uploadId] === "cancel" ? (
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                              ) : (
+                                <X className="h-3 w-3" />
+                              )}
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void handleRetryUploadAnalysis(item.uploadId)}
+                              disabled={analysisActionByUploadId[item.uploadId] !== null}
+                              className="inline-flex h-6 items-center gap-1 rounded-md bg-[#0F6E56] px-2 text-[10px] font-semibold text-white hover:bg-[#0C614D] disabled:opacity-60"
+                            >
+                              {analysisActionByUploadId[item.uploadId] === "retry" ? (
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                              ) : (
+                                <RotateCcw className="h-3 w-3" />
+                              )}
+                              Retry
+                            </button>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
+              
+              {locationGroups.length === 0 && uploadsWithoutCoords.length === 0 ? (
                 <div className="rounded-xl border border-[#D3D1C7] bg-white px-3 py-3 text-xs text-[#6B7280]">
-                  No unfinished uploads found.
+                  No unfinished assessments found.
                 </div>
               ) : (
-                unfinishedUploads.map((upload) => {
-                  const isProcessing = upload.status === "processing"
-                  const isQueued = upload.status === "queued"
-                  const isActionable = canTriggerUpload(upload.status)
-                  const isActionLoading = actioningUploadId === upload.id
+                <>
+                  {/* Location Groups */}
+                  {locationGroups.map((group) => {
+                    const isActionable = canTriggerGroup(group)
+                    const isActionLoading = actioningGroupId === group.group_id
+                    const processingUploads = group.uploads.filter((u) => u.analysis_active)
+                    const hasProcessing = processingUploads.length > 0
+                    const groupProgress = hasProcessing
+                      ? Math.round(
+                          processingUploads.reduce((acc, upload) => acc + (upload.progress_percent ?? 0), 0) /
+                          Math.max(1, processingUploads.length)
+                        )
+                      : 0
+                    const groupThought = processingUploads[0]?.analysis_thought || "AI is analyzing photos..."
 
-                  return (
-                    <div key={upload.id} className="rounded-xl border border-[#D3D1C7] bg-white px-3 py-2.5">
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <p className="truncate text-xs font-bold text-[#17352b]">{upload.original_filename}</p>
-                          <p className="mt-0.5 text-[11px] text-[#6B7280]">{upload.id} · {upload.file_type.replace(/_/g, " ")}</p>
+                    return (
+                      <div key={group.group_id} className="rounded-xl border border-[#D3D1C7] bg-white overflow-hidden">
+                        {/* Location Header */}
+                        <div className="px-3 py-2.5 bg-[#FAFAF8]">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5">
+                                <MapPin className="h-3.5 w-3.5 flex-shrink-0 text-[#0F6E56]" />
+                                <p className="truncate text-xs font-bold text-[#17352b]">
+                                  {group.location_name || `Location ${group.center_lat?.toFixed(5)}, ${group.center_lon?.toFixed(5)}`}
+                                </p>
+                              </div>
+                              <p className="mt-0.5 text-[11px] text-[#6B7280]">
+                                {group.upload_count} file{group.upload_count > 1 ? 's' : ''} · Lat: {group.center_lat?.toFixed(5)}, Lon: {group.center_lon?.toFixed(5)}
+                              </p>
+                            </div>
+                            {group.upload_count > 1 && (
+                              <span className="flex-shrink-0 rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-bold text-blue-800">
+                                Batch
+                              </span>
+                            )}
+                          </div>
+
+                          {hasProcessing && (
+                            <div className="mt-2">
+                              <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#E5E7EB]">
+                                <div
+                                  className="h-full rounded-full bg-[#0F6E56] transition-all duration-500"
+                                  style={{ width: `${Math.max(0, Math.min(100, groupProgress))}%` }}
+                                />
+                              </div>
+                              <p className="mt-1 text-[11px] text-[#0F6E56]">{groupThought}</p>
+                            </div>
+                          )}
+
+                          <div className="mt-2">
+                            {isActionable ? (
+                              <button
+                                type="button"
+                                onClick={() => void handleTriggerLocationGroup(group)}
+                                disabled={isActionLoading}
+                                className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#0F6E56] px-3 text-xs font-semibold text-white hover:bg-[#0C614D] disabled:opacity-60"
+                              >
+                                {isActionLoading ? (
+                                  <Loader2 className="h-3 w-3 animate-spin" />
+                                ) : (
+                                  <Play className="h-3 w-3" />
+                                )}
+                                {isActionLoading ? "Starting..." : getGroupActionLabel(group)}
+                              </button>
+                            ) : (
+                              <div className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#D3D1C7] bg-[#F7F6F2] px-3 text-xs font-semibold text-[#6B7280]">
+                                {getGroupActionLabel(group)}
+                              </div>
+                            )}
+                          </div>
                         </div>
-                        <span className="rounded bg-[#F1EFE8] px-1.5 py-0.5 text-[10px] font-semibold uppercase text-[#6B7280]">
-                          {upload.status}
-                        </span>
+
+                        {/* Upload List Preview */}
+                        <div className="border-t border-[#F1EFE8] px-3 py-2">
+                          <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-[#9CA3AF]">
+                            Files at this location
+                          </p>
+                          <div className="space-y-1.5">
+                            {group.uploads.slice(0, 3).map((upload) => (
+                              <div key={upload.id} className="flex items-center gap-2 text-xs">
+                                {upload.file_type.includes("photo") || upload.file_type.includes("image") ? (
+                                  <ImageIcon className="h-3 w-3 text-[#6B7280]" />
+                                ) : (
+                                  <Film className="h-3 w-3 text-[#6B7280]" />
+                                )}
+                                <span className="truncate flex-1 text-[#4B5563]">{upload.original_filename}</span>
+                                <span className={`text-[10px] ${
+                                  upload.status === "failed" ? "text-red-600" :
+                                  upload.status === "processing" ? "text-[#0F6E56]" :
+                                  upload.status === "done" ? "text-green-600" :
+                                  "text-[#9CA3AF]"
+                                }`}>
+                                  {upload.status}
+                                </span>
+                              </div>
+                            ))}
+                            {group.uploads.length > 3 && (
+                              <p className="text-[10px] text-[#9CA3AF] pl-5">
+                                +{group.uploads.length - 3} more
+                              </p>
+                            )}
+                          </div>
+                        </div>
                       </div>
+                    )
+                  })}
 
-                      {isProcessing && (
-                        <div className="mt-2">
-                          <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#E5E7EB]">
-                            <div className="h-full w-2/3 animate-pulse rounded-full bg-[#0F6E56]" />
+                  {/* Uploads Without Coordinates */}
+                  {uploadsWithoutCoords.length > 0 && (
+                    <div className="rounded-xl border border-yellow-200 bg-yellow-50 p-3">
+                      <div className="flex items-center gap-2 mb-2">
+                        <AlertCircle className="h-4 w-4 text-yellow-700" />
+                        <p className="text-xs font-semibold text-yellow-800">
+                          Missing GPS Coordinates ({uploadsWithoutCoords.length})
+                        </p>
+                      </div>
+                      <p className="text-[10px] text-yellow-700 mb-2">
+                        These uploads cannot be grouped by location. Please add coordinates.
+                      </p>
+                      <div className="space-y-1.5">
+                        {uploadsWithoutCoords.map((upload) => (
+                          <div key={upload.id} className="flex items-center gap-2 rounded bg-white px-2 py-1.5 text-xs">
+                            <span className="truncate flex-1 text-[#4B5563]">{upload.original_filename}</span>
+                            <span className="text-[10px] text-[#9CA3AF]">{upload.status}</span>
                           </div>
-                          <p className="mt-1 text-[11px] text-[#0F6E56]">Analysis in progress...</p>
-                        </div>
-                      )}
-
-                      {isQueued && (
-                        <p className="mt-2 text-[11px] font-semibold text-amber-700">Queued for processing</p>
-                      )}
-
-                      {upload.error_message && (
-                        <p className="mt-2 text-[11px] text-red-600">{upload.error_message}</p>
-                      )}
-
-                      <div className="mt-2">
-                        {isActionable ? (
-                          <button
-                            type="button"
-                            onClick={() => void handleTriggerFromSheet(upload.id)}
-                            disabled={isActionLoading}
-                            className="inline-flex h-8 items-center rounded-lg bg-[#0F6E56] px-3 text-xs font-semibold text-white hover:bg-[#0C614D] disabled:opacity-60"
-                          >
-                            {isActionLoading ? "Starting..." : getActionLabel(upload.status)}
-                          </button>
-                        ) : (
-                          <div className="inline-flex h-8 items-center rounded-lg border border-[#D3D1C7] bg-[#F7F6F2] px-3 text-xs font-semibold text-[#6B7280]">
-                            {getActionLabel(upload.status)}
-                          </div>
-                        )}
+                        ))}
                       </div>
                     </div>
-                  )
-                })
+                  )}
+                </>
               )}
             </div>
           </aside>

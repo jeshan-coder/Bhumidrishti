@@ -2,9 +2,6 @@ import Link from "next/link"
 import Image from "next/image"
 import fullLogo from "@/app/logos/bhumidrishti_logo_full.svg"
 
-// This variable defines the primary model required by the app.
-const TARGET_MODEL = "gemma4:26b"
-
 // This variable defines backend base URL used by server-side navbar checks.
 const BACKEND_API_URL =
   process.env.BACKEND_INTERNAL_URL ??
@@ -41,11 +38,12 @@ async function getNavbarModelStatus(): Promise<{ label: string; className: strin
     }
 
     const payload = (await response.json()) as ModelHealthResponse
-    const isAvailable = payload.success && payload.data?.model === TARGET_MODEL && payload.data?.model_available
+    const activeModel = payload.data?.model ?? "Gemma 4"
+    const isAvailable = payload.success && Boolean(payload.data?.model_available)
 
     if (isAvailable) {
       return {
-        label: "Gemma 4 - online",
+        label: `${activeModel} - online`,
         className: "border-[#0b5f4b] bg-[#0c614d] text-[#E1F5EE]",
       }
     }

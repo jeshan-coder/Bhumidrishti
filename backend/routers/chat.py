@@ -11,11 +11,12 @@ from fastapi.responses import StreamingResponse
 from ollama import AsyncClient
 from db.postgres import get_pool
 from models.chat import ChatRequest, ChatResponseData
+from services.ai_runtime import ACTIVE_GEMMA_MODEL
 from services.gemma_pipeline import TOOLS, dispatch_tool
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
-MODEL_NAME = "gemma4:26b"
+MODEL_NAME = ACTIVE_GEMMA_MODEL
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 ollama_client = AsyncClient(host=OLLAMA_HOST)
 
@@ -62,7 +63,7 @@ def _message_field(message_block: Any, field_name: str) -> Any:
 
 @router.post("")
 async def chat_with_gemma(payload: ChatRequest) -> dict[str, Any]:
-    """Run a direct chat completion against gemma4:26b through Ollama."""
+    """Run a direct chat completion against the active Gemma model through Ollama."""
     try:
         logger.info("chat.request.started messages=%s temperature=%s", len(payload.messages), payload.temperature)
         messages = _build_messages(payload)

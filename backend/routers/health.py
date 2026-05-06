@@ -4,10 +4,11 @@ import os
 from typing import Any
 from fastapi import APIRouter
 from ollama import AsyncClient
+from services.ai_runtime import ACTIVE_GEMMA_MODEL
 
 router = APIRouter(prefix="", tags=["health"])
 
-MODEL_NAME = "gemma4:26b"
+MODEL_NAME = ACTIVE_GEMMA_MODEL
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 ollama_client = AsyncClient(host=OLLAMA_HOST)
 
@@ -38,7 +39,7 @@ async def root():
 
 @router.get("/health/model")
 async def model_health() -> dict[str, Any]:
-    """Check Ollama reachability and gemma4:26b availability."""
+    """Check Ollama reachability and gemma4:e4b availability."""
     try:
         list_response = await ollama_client.list()
 
