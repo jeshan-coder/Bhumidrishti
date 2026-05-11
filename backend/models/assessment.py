@@ -36,6 +36,7 @@ class Assessment(BaseModel):
     video_path: str | None = None
     ortho_path: str | None = None
     chip_path: str | None = None
+    pre_chip_path: str | None = None
     drone_frames: list[str] | None = None
     
     # Damage assessment from Gemma 4
@@ -85,6 +86,8 @@ class Assessment(BaseModel):
     field_note: str | None = None
     
     # Orthophoto batch info
+    site_id: int | None = None
+    site_name: str | None = None
     batch_id: str | None = None
     batch_building_count: int | None = None
     

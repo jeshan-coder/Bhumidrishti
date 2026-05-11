@@ -1,6 +1,7 @@
 """Assessment upload endpoints for ground photo, orthophoto, and video inputs."""
 
 import asyncio
+import json
 import os
 from io import BytesIO
 from pathlib import Path
@@ -55,6 +56,22 @@ def _error_response(message: str) -> dict[str, Any]:
         "data": None,
         "error": message,
     }
+
+
+# This function normalizes a GeoJSON payload that may arrive as dict or JSON string.
+def _normalize_geojson_payload(payload: Any) -> dict[str, Any]:
+    if isinstance(payload, dict):
+        return payload
+
+    if isinstance(payload, str):
+        try:
+            parsed_payload = json.loads(payload)
+            if isinstance(parsed_payload, dict):
+                return parsed_payload
+        except json.JSONDecodeError:
+            return {"type": "FeatureCollection", "features": []}
+
+    return {"type": "FeatureCollection", "features": []}
 
 
 # This function extracts and normalizes the extension from an uploaded filename.
@@ -257,7 +274,7 @@ async def list_assessments(
     where_clause = "WHERE status = $3" if status else ""
     query = f"""
         SELECT 
-            id, lat, lon, input_type, photo_path, severity, damage_type, 
+            id, lat, lon, input_type, photo_path, chip_path, pre_chip_path, severity, damage_type, 
             structural_risk, building_type, recommended_action, action_priority, 
             status, created_at, updated_at
         FROM assessments
@@ -315,6 +332,8 @@ async def get_assessment_building_layer(
                         'lon', a.lon,
                         'input_type', a.input_type,
                         'photo_path', a.photo_path,
+                        'chip_path', a.chip_path,
+                        'pre_chip_path', a.pre_chip_path,
                         'severity', a.severity,
                         'damage_type', a.damage_type,
                         'structural_risk', a.structural_risk,
@@ -346,19 +365,16 @@ async def get_assessment_building_layer(
                     },
                 })
 
-            geojson_payload = row.get("geojson")
+            geojson_payload = _normalize_geojson_payload(row.get("geojson"))
             features: list[Any] = []
-            if isinstance(geojson_payload, dict):
-                raw_features = geojson_payload.get("features")
-                if isinstance(raw_features, list):
-                    features = raw_features
+            raw_features = geojson_payload.get("features")
+            if isinstance(raw_features, list):
+                features = raw_features
 
             return _success_response(
                 {
                     "feature_count": len(features),
-                    "geojson": geojson_payload
-                    if isinstance(geojson_payload, dict)
-                    else {"type": "FeatureCollection", "features": []},
+                    "geojson": geojson_payload,
                 }
             )
     except Exception as exc:
@@ -374,7 +390,7 @@ async def get_assessment(assessment_id: str) -> dict[str, Any]:
     query = """
         SELECT 
             id, lat, lon, province, district, address_note, input_type,
-            photo_path, video_path, ortho_path, chip_path, drone_frames,
+            photo_path, video_path, ortho_path, chip_path, pre_chip_path, drone_frames,
             severity, damage_type, damage_description, structural_risk,
             building_type, building_floors, building_material, osm_building_id,
             estimated_occupants, occupant_status, recommended_action, action_priority,

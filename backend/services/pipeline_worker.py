@@ -649,6 +649,7 @@ async def save_ai_assessment(
     photo_path: str | None,
     field_note: str | None,
     assessment_data: dict[str, Any],
+    extra_fields: dict[str, Any] | None = None,
 ) -> str:
     """Save a single AI-generated assessment row into the assessments table."""
     _log_pipeline_event(
@@ -715,6 +716,9 @@ async def save_ai_assessment(
     if isinstance(address_note_value, str):
         address_note_value = address_note_value.strip() or None
 
+    # Merge extra_fields (orthophoto-specific) into normalized data for lookup below.
+    extra = extra_fields or {}
+
     sql_insert = """
         INSERT INTO assessments (
             id, lat, lon, geom, input_type, photo_path,
@@ -725,16 +729,33 @@ async def save_ai_assessment(
             slope_risk, nearest_shelter, shelter_distance_m, shelter_type,
             road_access, nearest_road, road_distance_m, reasoning,
             confidence, turkish_summary, field_note,
-            province, district, address_note, status
+            province, district, address_note, status,
+            osm_building_id, batch_id, chip_path,
+            site_id, site_name, pre_chip_path,
+            building_area_m2, building_width_m, building_height_m
         ) VALUES (
             $1, $2, $3,
             COALESCE(
+                -- 1. Exact OSM-ID lookup (batch/single-building path — osm_building_id = $34).
+                --    turkey_buildings.geom is MULTIPOLYGON EPSG:4326 — same SRID as assessments.geom.
                 (
                     SELECT tb.geom
                     FROM turkey_buildings AS tb
-                    WHERE ST_Contains(tb.geom, ST_SetSRID(ST_MakePoint($3, $2), 4326))
+                    WHERE $34::bigint IS NOT NULL
+                      AND tb.osm_id = $34::bigint
                     LIMIT 1
                 ),
+                -- 2. Spatial containment: building whose polygon contains the centroid point.
+                (
+                    SELECT tb.geom
+                    FROM turkey_buildings AS tb
+                    WHERE ST_Contains(
+                        tb.geom,
+                        ST_SetSRID(ST_MakePoint($3, $2), 4326)
+                    )
+                    LIMIT 1
+                ),
+                -- 3. Nearest building within 30 m (handles slight centroid offsets).
                 (
                     SELECT tb.geom
                     FROM turkey_buildings AS tb
@@ -749,6 +770,7 @@ async def save_ai_assessment(
                     ) ASC
                     LIMIT 1
                 ),
+                -- 4. Absolute fallback: store centroid as Point (EPSG:4326).
                 ST_SetSRID(ST_MakePoint($3, $2), 4326)
             ),
             $4, $5,
@@ -759,7 +781,10 @@ async def save_ai_assessment(
             $20, $21, $22, $23,
             $24, $25, $26, $27,
             $28, $29, $30,
-            $31, $32, $33, 'pending'
+            $31, $32, $33, 'pending',
+            $34, $35, $36,
+            $37, $38, $39,
+            $40, $41, $42
         )
     """
 
@@ -813,8 +838,134 @@ async def save_ai_assessment(
                 province_value,
                 district_value,
                 address_note_value,
+                # Extra orthophoto fields ($34–$42)
+                extra.get("osm_building_id") or normalized_assessment_data.get("osm_building_id"),
+                extra.get("batch_id") or normalized_assessment_data.get("batch_id"),
+                extra.get("chip_path"),
+                extra.get("site_id"),
+                extra.get("site_name"),
+                extra.get("pre_chip_path"),
+                extra.get("building_area_m2"),
+                extra.get("building_width_m"),
+                extra.get("building_height_m"),
             )
     except Exception as exc:
+        # Backward-compat: older DBs may not have assessments.site_id yet.
+        if "site_id" in str(exc).lower():
+            logger.warning("assessment_insert_without_site_id_fallback error=%s", exc)
+            legacy_sql_insert = """
+                INSERT INTO assessments (
+                    id, lat, lon, geom, input_type, photo_path,
+                    severity, damage_type, damage_description, structural_risk,
+                    building_type, building_floors, building_material,
+                    estimated_occupants, occupant_status, recommended_action,
+                    action_priority, flood_zone, elevation_m, slope_degrees,
+                    slope_risk, nearest_shelter, shelter_distance_m, shelter_type,
+                    road_access, nearest_road, road_distance_m, reasoning,
+                    confidence, turkish_summary, field_note,
+                    province, district, address_note, status,
+                    osm_building_id, batch_id, chip_path,
+                    site_name, pre_chip_path,
+                    building_area_m2, building_width_m, building_height_m
+                ) VALUES (
+                    $1, $2, $3,
+                    COALESCE(
+                        (
+                            SELECT tb.geom
+                            FROM turkey_buildings AS tb
+                            WHERE $34::bigint IS NOT NULL
+                              AND tb.osm_id = $34::bigint
+                            LIMIT 1
+                        ),
+                        (
+                            SELECT tb.geom
+                            FROM turkey_buildings AS tb
+                            WHERE ST_Contains(
+                                tb.geom,
+                                ST_SetSRID(ST_MakePoint($3, $2), 4326)
+                            )
+                            LIMIT 1
+                        ),
+                        (
+                            SELECT tb.geom
+                            FROM turkey_buildings AS tb
+                            WHERE ST_DWithin(
+                                tb.geom::geography,
+                                ST_SetSRID(ST_MakePoint($3, $2), 4326)::geography,
+                                30
+                            )
+                            ORDER BY ST_Distance(
+                                tb.geom::geography,
+                                ST_SetSRID(ST_MakePoint($3, $2), 4326)::geography
+                            ) ASC
+                            LIMIT 1
+                        ),
+                        ST_SetSRID(ST_MakePoint($3, $2), 4326)
+                    ),
+                    $4, $5,
+                    $6, $7, $8, $9,
+                    $10, $11, $12,
+                    $13, $14, $15,
+                    $16, $17, $18, $19,
+                    $20, $21, $22, $23,
+                    $24, $25, $26, $27,
+                    $28, $29, $30,
+                    $31, $32, $33, 'pending',
+                    $34, $35, $36,
+                    $37, $38,
+                    $39, $40, $41
+                )
+            """
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    legacy_sql_insert,
+                    assessment_id,
+                    lat,
+                    lon,
+                    input_type,
+                    photo_path,
+                    normalized_assessment_data.get("severity"),
+                    normalized_assessment_data.get("damage_type"),
+                    normalized_assessment_data.get("damage_description"),
+                    normalized_assessment_data.get("structural_risk"),
+                    normalized_assessment_data.get("building_type"),
+                    normalized_assessment_data.get("building_floors"),
+                    normalized_assessment_data.get("building_material"),
+                    normalized_assessment_data.get("estimated_occupants"),
+                    normalized_assessment_data.get("occupant_status"),
+                    normalized_assessment_data.get("recommended_action"),
+                    normalized_assessment_data.get("action_priority"),
+                    normalized_assessment_data.get("flood_zone", False),
+                    normalized_assessment_data.get("elevation_m"),
+                    normalized_assessment_data.get("slope_degrees"),
+                    normalized_assessment_data.get("slope_risk"),
+                    normalized_assessment_data.get("nearest_shelter"),
+                    normalized_assessment_data.get("shelter_distance_m"),
+                    normalized_assessment_data.get("shelter_type"),
+                    normalized_assessment_data.get("road_access"),
+                    normalized_assessment_data.get("nearest_road"),
+                    normalized_assessment_data.get("road_distance_m"),
+                    normalized_assessment_data.get("reasoning"),
+                    normalized_assessment_data.get("confidence"),
+                    normalized_assessment_data.get("turkish_summary"),
+                    field_note,
+                    province_value,
+                    district_value,
+                    address_note_value,
+                    extra.get("osm_building_id") or normalized_assessment_data.get("osm_building_id"),
+                    extra.get("batch_id") or normalized_assessment_data.get("batch_id"),
+                    extra.get("chip_path"),
+                    extra.get("site_name"),
+                    extra.get("pre_chip_path"),
+                    extra.get("building_area_m2"),
+                    extra.get("building_width_m"),
+                    extra.get("building_height_m"),
+                )
+            _log_pipeline_event(
+                "save_assessment_db_insert_legacy_site_id_fallback_succeeded",
+                {"assessment_id": assessment_id},
+            )
+            return assessment_id
         _log_pipeline_event(
             "save_assessment_db_insert_failed",
             {
@@ -950,6 +1101,14 @@ async def process_upload(upload_row: dict[str, Any], pool) -> None:
             """Bridge Gemma loop events into upload progress updates."""
             event_stage = str(event.get("stage") or "ai_reasoning")
             event_thought = str(event.get("thought") or "AI is analyzing the scene.")
+            if event_stage == "ai_reasoning_stream":
+                thinking_text = event.get("thinking_text")
+                if isinstance(thinking_text, str) and thinking_text.strip():
+                    event_thought = thinking_text[-480:]
+            elif event_stage == "ai_response_stream":
+                response_text = event.get("response_text")
+                if isinstance(response_text, str) and response_text.strip():
+                    event_thought = response_text[-480:]
             event_progress = int(event.get("progress_percent") or 35)
             _log_pipeline_event(
                 "process_upload_agent_progress",
@@ -1161,6 +1320,14 @@ async def process_upload_group(upload_rows: list[dict[str, Any]], pool) -> None:
             """Bridge Gemma loop events into grouped-upload progress updates."""
             event_stage = str(event.get("stage") or "ai_reasoning")
             event_thought = str(event.get("thought") or "AI is analyzing grouped photos.")
+            if event_stage == "ai_reasoning_stream":
+                thinking_text = event.get("thinking_text")
+                if isinstance(thinking_text, str) and thinking_text.strip():
+                    event_thought = thinking_text[-480:]
+            elif event_stage == "ai_response_stream":
+                response_text = event.get("response_text")
+                if isinstance(response_text, str) and response_text.strip():
+                    event_thought = response_text[-480:]
             event_progress = int(event.get("progress_percent") or 35)
             set_analysis_progress_for_uploads(
                 upload_ids,

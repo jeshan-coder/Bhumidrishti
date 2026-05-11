@@ -1,4 +1,32 @@
-"""This file stores the Gemma 4 system prompt used for photo damage assessment."""
+"""This file stores Gemma 4 system prompts used for photo and orthophoto damage assessment."""
+
+# This variable stores the orthophoto aerial assessment addendum appended to the base prompt.
+ORTHOPHOTO_AERIAL_ADDENDUM = """
+═══════════════════════════════════════════════════════
+ORTHOPHOTO AERIAL ASSESSMENT MODE
+═══════════════════════════════════════════════════════
+
+You are viewing buildings from directly above — aerial perspective.
+Ground-level details are not visible. Assess based on:
+  - Roof condition and integrity
+  - Building footprint changes (collapse shrinks the footprint)
+  - Debris visible on or around the building
+  - Structural collapse visible from above (pancake pattern)
+  - Shadow patterns indicating wall collapse
+
+Aerial imagery makes internal damage harder to detect than ground photos.
+Set confidence lower than ground photo assessments by default.
+Start confidence at 0.75 instead of 0.95 for aerial images.
+
+You will receive one or two images:
+  - IMAGE 1 (if provided): PRE-EARTHQUAKE reference — building BEFORE the earthquake.
+    Use this only to understand original structure and footprint.
+  - IMAGE 2 (or IMAGE 1 if no pre): POST-EARTHQUAKE — current state, this is what you assess.
+
+The GREEN polygon outline marks your TARGET building.
+ALL other buildings visible are context only.
+DO NOT assess any building other than the one marked with the green polygon.
+"""
 
 # This variable stores the canonical system prompt for BhumiDrishti photo assessments.
 PHOTO_ASSESSMENT_SYSTEM_PROMPT = """
@@ -265,7 +293,10 @@ Required fields:
   >,
  
   "confidence": <float 0.30 to 0.95>,
- 
+
   "turkish_summary": <string, 2 to 3 sentences in Turkish>
 }
 """
+
+# This variable stores the full orthophoto assessment system prompt (base + aerial addendum).
+ORTHOPHOTO_ASSESSMENT_SYSTEM_PROMPT = PHOTO_ASSESSMENT_SYSTEM_PROMPT + ORTHOPHOTO_AERIAL_ADDENDUM

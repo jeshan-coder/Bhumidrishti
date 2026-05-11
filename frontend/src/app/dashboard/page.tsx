@@ -1,360 +1,622 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { AssessmentCard } from "@/components/triage/assessment-card"
-import { Play, Loader2, CheckCircle2, AlertCircle, MapPin, ChevronDown, ChevronRight, Image, Film } from "lucide-react"
+import {
+  closeAssessment,
+  createFieldWorker,
+  dispatchAssessmentToWorker,
+  fetchFieldWorkers,
+  type FieldWorker as DispatchWorker,
+} from "@/lib/api/dispatch"
+import { toast } from "sonner"
+import { FieldMapChatSidebar } from "@/components/maps/field-map-chat-sidebar"
 
-type Assessment = {
-  id: string
-  lat: number
-  lon: number
-  input_type: string
-  photo_path: string | null
+type DashboardMetrics = {
+  total_assessed: number
+  critical: number
+  pending_response: number
+  responded: number
+  active_sites: number
+}
+
+type DashboardDetails = {
+  sites: SiteCardData[]
+  severity_distribution: SeverityBar[]
+  recent_activity: ActivityItem[]
+  triage: TriageItem[]
+  field_workers: FieldWorker[]
+}
+
+type SiteCardData = {
+  site_name: string
+  status: string
+  total_buildings: number
+  assessed_buildings: number
+  created_by: string
+  severity_breakdown: {
+    sev5: number
+    sev4: number
+    sev3: number
+    sev2: number
+    sev1: number
+  }
+}
+
+type SeverityBar = {
   severity: number
-  damage_type: string
-  structural_risk: string
-  building_type: string
-  recommended_action: string
-  action_priority: number
+  count: number
+}
+
+type ActivityItem = {
+  assessment_id: string
+  severity: number
+  building_id: number | null
+  site_name: string
+  worker_name: string
+  input_type: string
+  created_at: string | null
+  signs_of_life: boolean
+}
+
+type TriageItem = ActivityItem & {
   status: string
-  created_at: string
 }
 
-type Upload = {
-  id: string
-  file_type: string
-  original_filename: string
-  saved_path: string
-  lat: number
-  lon: number
-  status: string
-  is_analyzed: boolean
-  uploaded_at: string
-  worker_name: string | null
-  field_note: string | null
+type FieldWorker = {
+  worker_name: string
+  assessment_count: number
+  last_activity_at: string | null
+  status?: "available" | "busy"
 }
 
-type LocationGroup = {
-  group_id: string
-  center_lat: number
-  center_lon: number
-  upload_count: number
-  location_name: string | null
-  uploads: Upload[]
+const API_BASE =
+  process.env.NEXT_PUBLIC_BACKEND_URL ??
+  process.env.NEXT_PUBLIC_API_URL ??
+  "http://localhost:8000"
+
+const EMPTY_DETAILS: DashboardDetails = {
+  sites: [],
+  severity_distribution: [],
+  recent_activity: [],
+  triage: [],
+  field_workers: [],
 }
 
-function PendingUploadCard({
-  upload,
-  onAnalysisStarted
-}: {
-  upload: Upload
-  onAnalysisStarted: (id: string) => void
-}) {
-  const [isTriggering, setIsTriggering] = useState(false)
-  const [currentStatus, setCurrentStatus] = useState(upload.status)
+function toTimeAgo(value: string | null): string {
+  if (!value) return "just now"
+  const ts = Date.parse(value)
+  if (Number.isNaN(ts)) return "just now"
+  const diffSec = Math.max(0, Math.floor((Date.now() - ts) / 1000))
+  if (diffSec < 60) return `${diffSec}s ago`
+  const diffMin = Math.floor(diffSec / 60)
+  if (diffMin < 60) return `${diffMin} min ago`
+  const diffHour = Math.floor(diffMin / 60)
+  if (diffHour < 24) return `${diffHour}h ago`
+  return `${Math.floor(diffHour / 24)}d ago`
+}
 
-  // Poll if processing
+function severityColorClass(severity: number): string {
+  if (severity >= 5) return "bg-red-600"
+  if (severity === 4) return "bg-red-500"
+  if (severity === 3) return "bg-amber-500"
+  if (severity === 2) return "bg-lime-600"
+  return "bg-green-700"
+}
+
+function statusPill(status: string): string {
+  const value = status.toLowerCase()
+  if (value === "processing") return "bg-emerald-100 text-emerald-800"
+  if (value === "active") return "bg-teal-100 text-teal-800"
+  if (value === "responded") return "bg-blue-100 text-blue-800"
+  if (value === "closed") return "bg-slate-200 text-slate-700"
+  if (value === "completed" || value === "complete") return "bg-slate-100 text-slate-700"
+  return "bg-zinc-100 text-zinc-700"
+}
+
+export default function DashboardPage() {
+  const [metrics, setMetrics] = useState<DashboardMetrics>({
+    total_assessed: 0,
+    critical: 0,
+    pending_response: 0,
+    responded: 0,
+    active_sites: 0,
+  })
+  const [isLoading, setIsLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [details, setDetails] = useState<DashboardDetails>(EMPTY_DETAILS)
+  const [selectedSiteFilter, setSelectedSiteFilter] = useState<string>("All")
+  const [selectedStatusFilter, setSelectedStatusFilter] = useState<string>("All")
+  const [isChatSidebarOpen, setIsChatSidebarOpen] = useState(false)
+  const [dispatchWorkers, setDispatchWorkers] = useState<DispatchWorker[]>([])
+  const [dispatchTarget, setDispatchTarget] = useState<TriageItem | null>(null)
+  const [selectedWorkerName, setSelectedWorkerName] = useState("")
+  const [newWorkerName, setNewWorkerName] = useState("")
+  const [dispatchBusyId, setDispatchBusyId] = useState<string | null>(null)
+  const [closeBusyId, setCloseBusyId] = useState<string | null>(null)
+  const [showAddWorkerDialog, setShowAddWorkerDialog] = useState(false)
+  const [addWorkerName, setAddWorkerName] = useState("")
+  const [addWorkerBusy, setAddWorkerBusy] = useState(false)
+
   useEffect(() => {
-    let interval: NodeJS.Timeout
-    if (currentStatus === "processing") {
-      interval = setInterval(async () => {
-        try {
-          const res = await fetch(`http://localhost:8000/uploads/${upload.id}`)
-          const json = await res.json()
-          if (json.success && json.data.status !== "processing") {
-            setCurrentStatus(json.data.status)
-            if (json.data.status === "done") {
-              onAnalysisStarted(upload.id)
-            }
-          }
-        } catch (err) {
-          console.error(err)
-        }
-      }, 5000)
-    }
-    return () => clearInterval(interval)
-  }, [currentStatus, upload.id, onAnalysisStarted])
+    let isMounted = true
 
-  const handleStart = async () => {
-    setIsTriggering(true)
-    try {
-      const res = await fetch(`http://localhost:8000/uploads/${upload.id}/analyze`, {
-        method: "POST"
-      })
-      const json = await res.json()
-      if (json.success) {
-        setCurrentStatus("processing")
-      } else {
-        alert(json.error)
+    const load = async (silent = false) => {
+      try {
+        if (!silent) setIsLoading(true)
+        const [metricsRes, detailsRes, workers] = await Promise.all([
+          fetch(`${API_BASE}/batch/dashboard-metrics`),
+          fetch(`${API_BASE}/batch/dashboard-details`),
+          fetchFieldWorkers().catch(() => []),
+        ])
+        const metricsJson = await metricsRes.json()
+        const detailsJson = await detailsRes.json()
+        if (!metricsJson.success) {
+          throw new Error(metricsJson.error || "Failed to load dashboard metrics")
+        }
+        if (!detailsJson.success) {
+          throw new Error(detailsJson.error || "Failed to load dashboard details")
+        }
+        if (isMounted) {
+          setMetrics(metricsJson.data as DashboardMetrics)
+          setDetails((detailsJson.data as DashboardDetails) ?? EMPTY_DETAILS)
+          setDispatchWorkers(workers)
+          setError(null)
+        }
+      } catch (err) {
+        if (!isMounted) return
+        setError(err instanceof Error ? err.message : "Failed to load dashboard")
+      } finally {
+        if (isMounted && !silent) setIsLoading(false)
       }
+    }
+
+    void load(false)
+    const intervalId = window.setInterval(() => {
+      void load(true)
+    }, 10000)
+
+    return () => {
+      isMounted = false
+      window.clearInterval(intervalId)
+    }
+  }, [])
+
+  const triageSites = [
+    "All",
+    ...Array.from(new Set(details.triage.map((item) => item.site_name).filter(Boolean))).sort(),
+  ]
+  const triageStatuses = ["All", "pending", "responded"]
+  const filteredTriage =
+    details.triage.filter((item) => {
+      const siteMatch = selectedSiteFilter === "All" || item.site_name === selectedSiteFilter
+      const statusMatch =
+        selectedStatusFilter === "All" ||
+        String(item.status || "")
+          .toLowerCase()
+          .trim() === selectedStatusFilter
+      return siteMatch && statusMatch
+    })
+  const severityMax = Math.max(1, ...details.severity_distribution.map((row) => row.count))
+
+  async function handleDispatch() {
+    if (!dispatchTarget || dispatchBusyId) return
+    const worker = newWorkerName.trim() || selectedWorkerName.trim()
+    if (!worker) return
+    try {
+      setDispatchBusyId(dispatchTarget.assessment_id)
+      await dispatchAssessmentToWorker(dispatchTarget.assessment_id, worker, true)
+      setDispatchTarget(null)
+      setSelectedWorkerName("")
+      setNewWorkerName("")
+      const [workers] = await Promise.all([fetchFieldWorkers().catch(() => [])])
+      setDispatchWorkers(workers)
+      const detailsRes = await fetch(`${API_BASE}/batch/dashboard-details`)
+      const detailsJson = await detailsRes.json()
+      if (detailsJson.success) setDetails((detailsJson.data as DashboardDetails) ?? EMPTY_DETAILS)
+      toast.success(`Dispatched to ${worker}`)
     } catch (err) {
-      alert("Failed to start analysis")
+      const msg = err instanceof Error ? err.message : "Dispatch failed"
+      setError(msg)
+      toast.error(msg)
     } finally {
-      setIsTriggering(false)
+      setDispatchBusyId(null)
     }
   }
 
-  const isImage = upload.file_type.includes("photo") || upload.file_type.includes("image")
-
-  return (
-    <div className="flex items-center gap-3 rounded-lg border border-[#D3D1C7] bg-[#FAFAF8] p-3">
-      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[#0F6E56]/10">
-        {isImage ? <Image size={20} className="text-[#0F6E56]" /> : <Film size={20} className="text-[#0F6E56]" />}
-      </div>
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium text-[#17352b]">{upload.original_filename}</p>
-        <p className="text-xs text-[#6b7280]">
-          {upload.worker_name || "Unknown worker"} · {new Date(upload.uploaded_at).toLocaleDateString()}
-        </p>
-      </div>
-      {currentStatus === "uploaded" || currentStatus === "failed" ? (
-        <button
-          onClick={handleStart}
-          disabled={isTriggering}
-          className="flex shrink-0 items-center gap-1 rounded-md bg-[#0F6E56] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#0c5945] disabled:opacity-50"
-        >
-          {isTriggering ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
-          {currentStatus === "failed" ? "Retry" : "Assess"}
-        </button>
-      ) : currentStatus === "processing" ? (
-        <span className="flex shrink-0 items-center gap-1 rounded-md bg-yellow-100 px-2 py-1 text-xs font-medium text-yellow-700">
-          <Loader2 size={12} className="animate-spin" />
-          Processing
-        </span>
-      ) : currentStatus === "done" ? (
-        <span className="flex shrink-0 items-center gap-1 rounded-md bg-green-100 px-2 py-1 text-xs font-medium text-green-700">
-          <CheckCircle2 size={12} />
-          Done
-        </span>
-      ) : (
-        <span className="flex shrink-0 items-center gap-1 rounded-md bg-gray-100 px-2 py-1 text-xs font-medium text-gray-600">
-          <AlertCircle size={12} />
-          {currentStatus}
-        </span>
-      )}
-    </div>
-  )
-}
-
-function LocationGroupCard({
-  group,
-  onAnalysisStarted
-}: {
-  group: LocationGroup
-  onAnalysisStarted: (id: string) => void
-}) {
-  const [isExpanded, setIsExpanded] = useState(false)
-  const hasMultiple = group.upload_count > 1
-
-  return (
-    <div className="rounded-xl border border-[#D3D1C7] bg-white shadow-sm overflow-hidden">
-      <button
-        onClick={() => setIsExpanded(!isExpanded)}
-        className="flex w-full items-center gap-3 p-4 text-left hover:bg-[#FAFAF8] transition-colors"
-      >
-        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-[#0F6E56]/10">
-          <MapPin size={24} className="text-[#0F6E56]" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <h3 className="font-semibold text-[#17352b]">
-            {group.location_name || `Location ${group.center_lat?.toFixed(4)}, ${group.center_lon?.toFixed(4)}`}
-          </h3>
-          <p className="mt-0.5 text-sm text-[#6b7280]">
-            {hasMultiple ? `${group.upload_count} uploads` : "1 upload"} · 
-            Lat: {group.center_lat?.toFixed(5)}, Lon: {group.center_lon?.toFixed(5)}
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          {hasMultiple && (
-            <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs font-bold text-blue-800">
-              Batch
-            </span>
-          )}
-          {isExpanded ? <ChevronDown size={20} className="text-[#6b7280]" /> : <ChevronRight size={20} className="text-[#6b7280]" />}
-        </div>
-      </button>
-
-      {isExpanded && (
-        <div className="border-t border-[#F1EFE8] bg-[#FAFAF8] p-3">
-          <div className="space-y-2">
-            {group.uploads.map((upload) => (
-              <PendingUploadCard
-                key={upload.id}
-                upload={upload}
-                onAnalysisStarted={onAnalysisStarted}
-              />
-            ))}
-          </div>
-          {hasMultiple && (
-            <div className="mt-3 flex justify-end">
-              <button
-                onClick={async () => {
-                  // Start analysis for all uploads in this group
-                  for (const upload of group.uploads) {
-                    if (upload.status === "uploaded" || upload.status === "failed") {
-                      try {
-                        await fetch(`http://localhost:8000/uploads/${upload.id}/analyze`, { method: "POST" })
-                      } catch (err) {
-                        console.error(`Failed to start analysis for ${upload.id}:`, err)
-                      }
-                    }
-                  }
-                  onAnalysisStarted(group.group_id)
-                }}
-                className="flex items-center gap-2 rounded-lg bg-[#0F6E56] px-4 py-2 text-sm font-semibold text-white hover:bg-[#0c5945]"
-              >
-                <Play size={16} />
-                Assess All {group.upload_count} Files
-              </button>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
-
-export default function TriagePage() {
-  const [assessments, setAssessments] = useState<Assessment[]>([])
-  const [locationGroups, setLocationGroups] = useState<LocationGroup[]>([])
-  const [uploadsWithoutCoords, setUploadsWithoutCoords] = useState<Upload[]>([])
-  const [isLoading, setIsLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-
-  // Refresh trigger when a new assessment completes
-  const [refreshKey, setRefreshKey] = useState(0)
-
-  useEffect(() => {
-    async function fetchData() {
-      setIsLoading(true)
-      try {
-        const [assRes, upRes] = await Promise.all([
-          fetch("http://localhost:8000/assessments?limit=50"),
-          fetch("http://localhost:8000/uploads/by-location?radius_meters=10")
-        ])
-
-        const assJson = await assRes.json()
-        const upJson = await upRes.json()
-
-        if (assJson.success && upJson.success) {
-          setAssessments(assJson.data)
-          setLocationGroups(upJson.data.location_groups)
-          setUploadsWithoutCoords(upJson.data.uploads_without_coords)
-        } else {
-          setError(assJson.error || upJson.error)
-        }
-      } catch (err: unknown) {
-        if (err instanceof Error) {
-          setError(err.message)
-        } else {
-          setError("An unknown error occurred")
-        }
-      } finally {
-        setIsLoading(false)
-      }
+  async function handleClose(assessmentId: string) {
+    if (closeBusyId) return
+    try {
+      setCloseBusyId(assessmentId)
+      await closeAssessment(assessmentId)
+      const [workers] = await Promise.all([fetchFieldWorkers().catch(() => [])])
+      setDispatchWorkers(workers)
+      const detailsRes = await fetch(`${API_BASE}/batch/dashboard-details`)
+      const detailsJson = await detailsRes.json()
+      if (detailsJson.success) setDetails((detailsJson.data as DashboardDetails) ?? EMPTY_DETAILS)
+      toast.success("Assessment closed")
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Close update failed"
+      setError(msg)
+      toast.error(msg)
+    } finally {
+      setCloseBusyId(null)
     }
+  }
 
-    fetchData()
-  }, [refreshKey])
-
-  const totalPendingUploads = locationGroups.reduce((sum, g) => sum + g.upload_count, 0) + uploadsWithoutCoords.length
+  async function handleAddWorker() {
+    const name = addWorkerName.trim()
+    if (!name || addWorkerBusy) return
+    try {
+      setAddWorkerBusy(true)
+      const worker = await createFieldWorker(name)
+      setAddWorkerName("")
+      setShowAddWorkerDialog(false)
+      const [workers] = await Promise.all([fetchFieldWorkers().catch(() => [])])
+      setDispatchWorkers(workers)
+      const detailsRes = await fetch(`${API_BASE}/batch/dashboard-details`)
+      const detailsJson = await detailsRes.json()
+      if (detailsJson.success) setDetails((detailsJson.data as DashboardDetails) ?? EMPTY_DETAILS)
+      toast.success(`Worker ${worker.name} added as available`)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to add worker"
+      setError(msg)
+      toast.error(msg)
+    } finally {
+      setAddWorkerBusy(false)
+    }
+  }
 
   return (
-    <main className="min-h-[calc(100dvh-49px)] w-full bg-[#FAFAF8] p-6 lg:p-10">
+    <main className="relative min-h-[calc(100dvh-49px)] w-full bg-[#FAFAF8] p-6 lg:p-10">
       <div className="mx-auto max-w-7xl">
-        <header className="mb-10 border-b border-[#D3D1C7] pb-6">
-          <h1 className="text-3xl font-bold tracking-tight text-[#17352b]">
-            Triage Dashboard
-          </h1>
-          <p className="mt-2 text-sm text-[#6b7280]">
-            Queue incoming physical intelligence and review structural damage assessments flagged by Gemma-4.
-          </p>
-        </header>
-
-        {isLoading && !assessments.length && totalPendingUploads === 0 && (
-          <div className="flex h-64 items-center justify-center">
-            <div className="h-8 w-8 animate-spin rounded-full border-4 border-[#0F6E56] border-t-transparent" />
-          </div>
-        )}
-
         {error && (
-          <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-600 mb-8">
+          <div className="mb-6 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
             {error}
           </div>
         )}
 
-        {!isLoading && !error && totalPendingUploads > 0 && (
-          <section className="mb-12">
-            <div className="mb-4 flex items-center gap-2">
-              <h2 className="text-xl font-bold text-[#17352b]">Pending Intelligence</h2>
-              <span className="flex h-5 items-center justify-center rounded-full bg-blue-100 px-2 text-xs font-bold text-blue-800">
-                {totalPendingUploads} Action{totalPendingUploads !== 1 && 's'} Required
-              </span>
-            </div>
-            
-            {/* Location Grouped Uploads */}
-            {locationGroups.length > 0 && (
-              <div className="mb-6">
-                <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-[#6b7280]">
-                  Grouped by Location ({locationGroups.length} location{locationGroups.length !== 1 ? 's' : ''})
-                </h3>
-                <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                  {locationGroups.map((group) => (
-                    <LocationGroupCard
-                      key={group.group_id}
-                      group={group}
-                      onAnalysisStarted={() => setRefreshKey(k => k + 1)}
-                    />
-                  ))}
-                </div>
+        {isLoading && !error ? (
+          <div className="flex h-48 items-center justify-center">
+            <div className="h-8 w-8 animate-spin rounded-full border-4 border-[#0F6E56] border-t-transparent" />
+          </div>
+        ) : (
+          <>
+            <section className="mb-5 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
+              <div className="rounded-2xl border border-[#E5E7EB] bg-white px-5 py-4 shadow-sm text-[#17352b]">
+                <p className="text-xs font-semibold uppercase tracking-wide">Total assessed</p>
+                <p className="mt-2 text-3xl font-bold">{metrics.total_assessed.toLocaleString()}</p>
               </div>
-            )}
+              <div className="rounded-2xl border border-red-200 bg-red-50 px-5 py-4 shadow-sm text-red-800">
+                <p className="text-xs font-semibold uppercase tracking-wide">Critical</p>
+                <p className="mt-2 text-3xl font-bold">{metrics.critical.toLocaleString()}</p>
+              </div>
+              <div className="rounded-2xl border border-amber-200 bg-amber-50 px-5 py-4 shadow-sm text-amber-800">
+                <p className="text-xs font-semibold uppercase tracking-wide">Pending response</p>
+                <p className="mt-2 text-3xl font-bold">{metrics.pending_response.toLocaleString()}</p>
+              </div>
+              <div className="rounded-2xl border border-teal-200 bg-teal-50 px-5 py-4 shadow-sm text-teal-800">
+                <p className="text-xs font-semibold uppercase tracking-wide">Responded</p>
+                <p className="mt-2 text-3xl font-bold">{metrics.responded.toLocaleString()}</p>
+              </div>
+              <div className="rounded-2xl border border-teal-200 bg-teal-50 px-5 py-4 shadow-sm text-teal-800">
+                <p className="text-xs font-semibold uppercase tracking-wide">Active sites</p>
+                <p className="mt-2 text-3xl font-bold">{metrics.active_sites.toLocaleString()}</p>
+              </div>
+            </section>
 
-            {/* Uploads Without Coordinates */}
-            {uploadsWithoutCoords.length > 0 && (
-              <div className="rounded-xl border border-yellow-200 bg-yellow-50 p-4">
-                <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold text-yellow-800">
-                  <AlertCircle size={16} />
-                  Uploads Without GPS Coordinates ({uploadsWithoutCoords.length})
-                </h3>
-                <div className="space-y-2">
-                  {uploadsWithoutCoords.map((upload) => (
-                    <PendingUploadCard
-                      key={upload.id}
-                      upload={upload}
-                      onAnalysisStarted={() => setRefreshKey(k => k + 1)}
-                    />
-                  ))}
+            <section className="grid grid-cols-1 gap-5 xl:grid-cols-3">
+              <div className="space-y-5 xl:col-span-2">
+                <div className="rounded-2xl border border-[#D9D6CB] bg-white p-4 shadow-sm">
+                  <div className="mb-3 flex items-center justify-between">
+                    <h2 className="text-sm font-semibold text-[#17352b]">Sites</h2>
+                  </div>
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                    {details.sites.map((site) => {
+                      const total = Math.max(0, Number(site.total_buildings) || 0)
+                      const assessed = Math.max(0, Number(site.assessed_buildings) || 0)
+                      const progress = total > 0 ? Math.min(100, Math.round((assessed / total) * 100)) : 0
+                      const isProcessing = String(site.status).toLowerCase() === "processing"
+                      return (
+                        <div
+                          key={site.site_name}
+                          className={`rounded-xl border p-3 ${
+                            isProcessing ? "border-emerald-500 bg-emerald-50/30" : "border-[#E8E5DA] bg-[#FAFAF8]"
+                          }`}
+                        >
+                          <div className="mb-2 flex items-start justify-between gap-2">
+                            <p className="line-clamp-1 text-sm font-semibold text-[#17352b]">{site.site_name}</p>
+                            <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${statusPill(site.status)}`}>
+                              {site.status}
+                            </span>
+                          </div>
+                          <div className="mb-1 h-2 overflow-hidden rounded-full bg-[#E8E6DD]">
+                            <div className="h-full rounded-full bg-[#0F6E56]" style={{ width: `${progress}%` }} />
+                          </div>
+                          <p className="text-[11px] text-[#6b7280]">
+                            {assessed} / {total} assessed
+                          </p>
+                          <div className="mt-2 flex flex-wrap gap-1">
+                            <span className="rounded bg-red-600/90 px-1.5 py-0.5 text-[10px] text-white">
+                              {site.severity_breakdown.sev5} extreme
+                            </span>
+                            <span className="rounded bg-red-500 px-1.5 py-0.5 text-[10px] text-white">
+                              {site.severity_breakdown.sev4} critical
+                            </span>
+                            <span className="rounded bg-amber-500 px-1.5 py-0.5 text-[10px] text-white">
+                              {site.severity_breakdown.sev3} moderate
+                            </span>
+                            <span className="rounded bg-lime-600 px-1.5 py-0.5 text-[10px] text-white">
+                              {site.severity_breakdown.sev2} low
+                            </span>
+                            <span className="rounded bg-green-700 px-1.5 py-0.5 text-[10px] text-white">
+                              {site.severity_breakdown.sev1} minimal
+                            </span>
+                          </div>
+                          <p className="mt-2 text-[11px] text-[#6b7280]">by {site.created_by || "Unknown"}</p>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-[#D9D6CB] bg-white p-4 shadow-sm">
+                  <h2 className="mb-3 text-sm font-semibold text-[#17352b]">Severity distribution</h2>
+                  <div className="space-y-2">
+                    {details.severity_distribution.map((row) => (
+                      <div key={row.severity} className="grid grid-cols-[58px_1fr_86px] items-center gap-2">
+                        <span className="text-xs font-medium text-[#4b5563]">Sev {row.severity}</span>
+                        <div className="h-4 overflow-hidden rounded bg-[#EFECE3]">
+                          <div
+                            className={`h-full ${severityColorClass(row.severity)}`}
+                            style={{ width: `${Math.max(2, Math.round((row.count / severityMax) * 100))}%` }}
+                          />
+                        </div>
+                        <span className="text-right text-xs text-[#4b5563]">{row.count} buildings</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-[#D9D6CB] bg-white p-4 shadow-sm">
+                  <h2 className="mb-3 text-sm font-semibold text-[#17352b]">Recent activity</h2>
+                  <div className="space-y-2">
+                    {details.recent_activity.slice(0, 5).map((item) => (
+                      <div key={item.assessment_id} className="flex items-start justify-between gap-3 rounded-lg border border-[#EEEADD] px-3 py-2">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold text-white ${severityColorClass(item.severity)}`}>
+                              {item.severity}
+                            </span>
+                            <p className="truncate text-xs font-medium text-[#17352b]">
+                              {item.building_id ? `Building ${item.building_id}` : "Building unknown"} · {item.site_name}
+                            </p>
+                          </div>
+                          <p className="mt-0.5 text-[11px] text-[#6b7280]">
+                            {item.worker_name} · {item.input_type.replace("_", " ")}
+                          </p>
+                        </div>
+                        <span className="shrink-0 text-[11px] text-[#6b7280]">{toTimeAgo(item.created_at)}</span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </div>
-            )}
-          </section>
+
+              <div className="space-y-5">
+                <div className="rounded-2xl border border-[#D9D6CB] bg-white p-4 shadow-sm">
+                  <h2 className="mb-3 text-sm font-semibold text-[#17352b]">Triage list</h2>
+                  <div className="mb-3 flex flex-wrap gap-1.5">
+                    {triageSites.map((siteName) => (
+                      <button
+                        key={siteName}
+                        onClick={() => setSelectedSiteFilter(siteName)}
+                        className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${
+                          selectedSiteFilter === siteName
+                            ? "bg-[#0F6E56] text-white"
+                            : "bg-[#F0EEE7] text-[#374151]"
+                        }`}
+                      >
+                        {siteName}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="mb-3 flex flex-wrap gap-1.5">
+                    {triageStatuses.map((status) => (
+                      <button
+                        key={status}
+                        onClick={() => setSelectedStatusFilter(status)}
+                        className={`rounded-full px-2.5 py-1 text-[11px] font-medium ${
+                          selectedStatusFilter === status
+                            ? "bg-[#0F6E56] text-white"
+                            : "bg-[#F0EEE7] text-[#374151]"
+                        }`}
+                      >
+                        {status}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="max-h-72 space-y-2 overflow-y-auto pr-1">
+                    {filteredTriage.map((item) => (
+                      <div key={item.assessment_id} className="rounded-lg border border-[#EEEADD] px-3 py-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold text-white ${severityColorClass(item.severity)}`}>
+                              {item.severity}
+                            </span>
+                            <span className="text-xs font-medium text-[#17352b]">
+                              {item.building_id ? `OSM:${item.building_id}` : "OSM:unknown"}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${statusPill(item.status)}`}>
+                              {item.status}
+                            </span>
+                            {item.signs_of_life && (
+                              <span className="rounded bg-red-600 px-1.5 py-0.5 text-[10px] font-semibold text-white">
+                                Signs of life
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        <p className="mt-1 text-[11px] text-[#6b7280]">
+                          {item.site_name} · {item.worker_name} · {toTimeAgo(item.created_at)}
+                        </p>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          <button
+                            onClick={() => {
+                              setDispatchTarget(item)
+                              setSelectedWorkerName("")
+                              setNewWorkerName("")
+                            }}
+                            disabled={dispatchBusyId === item.assessment_id || item.status.toLowerCase() === "closed"}
+                            className="rounded-md bg-[#0F6E56] px-2.5 py-1 text-[11px] font-semibold text-white disabled:opacity-50"
+                          >
+                            {dispatchBusyId === item.assessment_id ? "Dispatching..." : "Dispatch"}
+                          </button>
+                          <button
+                            onClick={() => void handleClose(item.assessment_id)}
+                            disabled={closeBusyId === item.assessment_id || item.status.toLowerCase() === "closed"}
+                            className="rounded-md bg-slate-700 px-2.5 py-1 text-[11px] font-semibold text-white disabled:opacity-50"
+                          >
+                            {closeBusyId === item.assessment_id ? "Closing..." : "Close"}
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  {dispatchTarget && (
+                    <div className="mt-3 rounded-lg border border-[#D9D6CB] bg-[#F8F7F2] p-3">
+                      <p className="text-xs font-semibold text-[#17352b]">
+                        Dispatch {dispatchTarget.building_id ? `OSM:${dispatchTarget.building_id}` : dispatchTarget.assessment_id}
+                      </p>
+                      <div className="mt-2 grid grid-cols-1 gap-2">
+                        <select
+                          value={selectedWorkerName}
+                          onChange={(e) => setSelectedWorkerName(e.target.value)}
+                          className="h-9 rounded-md border border-[#D9D6CB] bg-white px-2 text-xs"
+                        >
+                          <option value="">Select available worker</option>
+                          {dispatchWorkers.map((worker) => (
+                            <option
+                              key={worker.id}
+                              value={worker.name}
+                              disabled={worker.status === "busy"}
+                            >
+                              {worker.name} ({worker.status})
+                            </option>
+                          ))}
+                        </select>
+                        <input
+                          value={newWorkerName}
+                          onChange={(e) => setNewWorkerName(e.target.value)}
+                          placeholder="Or type new worker name"
+                          className="h-9 rounded-md border border-[#D9D6CB] bg-white px-2 text-xs"
+                        />
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => void handleDispatch()}
+                            disabled={dispatchBusyId != null || (!selectedWorkerName && !newWorkerName.trim())}
+                            className="rounded-md bg-[#0F6E56] px-3 py-1 text-xs font-semibold text-white disabled:opacity-50"
+                          >
+                            Confirm dispatch
+                          </button>
+                          <button
+                            onClick={() => {
+                              setDispatchTarget(null)
+                              setSelectedWorkerName("")
+                              setNewWorkerName("")
+                            }}
+                            className="rounded-md bg-zinc-200 px-3 py-1 text-xs font-semibold text-zinc-800"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-2xl border border-[#D9D6CB] bg-white p-4 shadow-sm">
+                  <div className="mb-3 flex items-center justify-between gap-2">
+                    <h2 className="text-sm font-semibold text-[#17352b]">Field workers</h2>
+                    <button
+                      onClick={() => setShowAddWorkerDialog(true)}
+                      className="flex h-6 w-6 items-center justify-center rounded-full bg-[#0F6E56] text-sm font-bold text-white"
+                      aria-label="Add field worker"
+                      title="Add field worker"
+                    >
+                      +
+                    </button>
+                  </div>
+                  <div className="space-y-2">
+                    {details.field_workers.map((worker) => {
+                      const workerStatus = (worker.status ?? "available").toLowerCase()
+                      const available = workerStatus === "available"
+                      return (
+                        <div key={worker.worker_name} className="flex items-center justify-between rounded-lg border border-[#EEEADD] px-3 py-2">
+                          <div className="flex items-center gap-2">
+                            <div className="flex h-7 w-7 items-center justify-center rounded-full bg-[#E8E5DA] text-[11px] font-semibold text-[#17352b]">
+                              {worker.worker_name
+                                .split(" ")
+                                .filter(Boolean)
+                                .slice(0, 2)
+                                .map((p) => p[0]?.toUpperCase() ?? "")
+                                .join("")}
+                            </div>
+                            <div>
+                              <p className="text-xs font-medium text-[#17352b]">{worker.worker_name}</p>
+                              <p className="text-[11px] text-[#6b7280]">
+                                {available ? "Available" : "Busy"} · {worker.assessment_count} assessments
+                              </p>
+                            </div>
+                          </div>
+                          <span className={`h-2.5 w-2.5 rounded-full ${available ? "bg-emerald-500" : "bg-amber-500"}`} />
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+
+                {showAddWorkerDialog && (
+                  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+                    <div className="w-full max-w-sm rounded-xl border border-[#D9D6CB] bg-white p-4 shadow-lg">
+                      <h3 className="text-sm font-semibold text-[#17352b]">Add field worker</h3>
+                      <input
+                        autoFocus
+                        value={addWorkerName}
+                        onChange={(e) => setAddWorkerName(e.target.value)}
+                        placeholder="Worker name"
+                        className="mt-3 h-9 w-full rounded-md border border-[#D9D6CB] bg-white px-3 text-xs outline-none focus:border-[#0F6E56]"
+                      />
+                      <div className="mt-3 flex justify-end gap-2">
+                        <button
+                          onClick={() => {
+                            if (addWorkerBusy) return
+                            setShowAddWorkerDialog(false)
+                            setAddWorkerName("")
+                          }}
+                          className="rounded-md bg-zinc-200 px-3 py-1.5 text-xs font-semibold text-zinc-800"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          onClick={() => void handleAddWorker()}
+                          disabled={addWorkerBusy || !addWorkerName.trim()}
+                          className="rounded-md bg-[#0F6E56] px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
+                        >
+                          {addWorkerBusy ? "Adding..." : "Add"}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+              </div>
+            </section>
+          </>
         )}
-
-        <section>
-          <div className="mb-4 flex items-center gap-2">
-            <h2 className="text-xl font-bold text-[#17352b]">Completed Assessments</h2>
-            <span className="flex h-5 items-center justify-center rounded-full bg-green-100 px-2 text-xs font-bold text-green-800">
-              {assessments.length}
-            </span>
-          </div>
-
-          {!isLoading && !error && assessments.length === 0 && (
-             <div className="flex h-48 flex-col items-center justify-center rounded-xl border border-dashed border-[#D3D1C7] bg-white">
-               <p className="font-medium text-[#17352b]">No assessments found</p>
-               <p className="mt-1 text-sm text-[#6b7280]">
-                 Trigger a pending upload above to generate reports.
-               </p>
-             </div>
-          )}
-
-          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {assessments.map((a) => (
-              <AssessmentCard key={a.id} assessment={a} />
-            ))}
-          </div>
-        </section>
       </div>
+      <FieldMapChatSidebar isOpen={isChatSidebarOpen} onOpenChange={setIsChatSidebarOpen} />
     </main>
   )
 }

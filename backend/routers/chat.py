@@ -12,7 +12,7 @@ from ollama import AsyncClient
 from db.postgres import get_pool
 from models.chat import ChatRequest, ChatResponseData
 from services.ai_runtime import ACTIVE_GEMMA_MODEL
-from services.gemma_pipeline import TOOLS, dispatch_tool
+from services.gemma_pipeline import CHAT_TOOLS, dispatch_tool
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -35,6 +35,17 @@ Tool usage policy:
 - Do not call all tools by default.
 - If user asks a specific question (for example only building info), call only the relevant tool.
 - Call multiple tools only when user asks for a broader analysis.
+- For coordination questions over existing records, use:
+  - get_assessments: filter assessments by site/severity/status/building/flood and return full records.
+  - get_sites: list sites with summary counts, filter by name/status/id, or spatial containment.
+  - get_field_workers: list available/busy workers before assigning.
+  - dispatch_assessments: assign one or many assessments to a worker (sets responded).
+  - update_assessment_status: change assessment status (responded or closed).
+
+Dispatch policy:
+- Never assign to a busy worker.
+- If user asks to dispatch but no worker is provided, ask which worker to use.
+- Suggest available workers from get_field_workers.
 
 Output policy:
 - Provide the final answer in plain language (not strict assessment JSON) unless user explicitly asks for assessment JSON.
@@ -124,7 +135,7 @@ async def chat_with_gemma_stream(payload: ChatRequest) -> StreamingResponse:
                 stream = await ollama_client.chat(
                     model=MODEL_NAME,
                     messages=messages,
-                    tools=TOOLS,
+                    tools=CHAT_TOOLS,
                     options={"temperature": payload.temperature},
                     stream=True,
                 )

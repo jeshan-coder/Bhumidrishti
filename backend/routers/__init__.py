@@ -7,6 +7,8 @@ from .dem import router as dem_router
 from .assessment import router as assessment_router
 from .upload import router as upload_router
 from .satellite import router as satellite_router
+from .batch import router as batch_router
+from .dispatch import router as dispatch_router
 
 __all__ = [
     "health_router",
@@ -16,4 +18,6 @@ __all__ = [
     "assessment_router",
     "upload_router",
     "satellite_router",
+    "batch_router",
+    "dispatch_router",
 ]

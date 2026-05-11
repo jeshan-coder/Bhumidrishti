@@ -22,7 +22,7 @@ CREATE TABLE assessments (
   -- ── Location ───────────────────────────────────────────────
   lat                   FLOAT         NOT NULL,
   lon                   FLOAT         NOT NULL,
-  geom                  GEOMETRY(Point, 4326),
+  geom                  GEOMETRY(Geometry, 4326),
   -- geom is auto-derived from lat/lon, used for spatial queries
 
   -- ── Administrative location ────────────────────────────────
@@ -175,6 +175,9 @@ CREATE TABLE assessments (
   -- e.g. "heard voices inside, road blocked from north"
 
   -- ── Orthophoto batch info ───────────────────────────────────
+  site_id               BIGINT,
+  -- canonical site id from sites table when this assessment belongs to a site workflow
+
   batch_id              VARCHAR(50),
   -- populated when assessment is part of orthophoto batch analysis
   -- all assessments from same orthophoto share same batch_id
@@ -240,6 +243,11 @@ CREATE INDEX idx_assessments_batch
   ON assessments(batch_id)
   WHERE batch_id IS NOT NULL;
 
+-- Site id — site-centric filtering
+CREATE INDEX idx_assessments_site_id
+  ON assessments(site_id)
+  WHERE site_id IS NOT NULL;
+
 -- OSM building id — link back to building footprint
 CREATE INDEX idx_assessments_osm_building
   ON assessments(osm_building_id)
@@ -255,8 +263,10 @@ CREATE INDEX idx_assessments_triage
 CREATE OR REPLACE FUNCTION update_assessment_geom()
 RETURNS TRIGGER AS $$
 BEGIN
-  IF NEW.lat IS NOT NULL AND NEW.lon IS NOT NULL THEN
+  IF NEW.geom IS NULL AND NEW.lat IS NOT NULL AND NEW.lon IS NOT NULL THEN
     NEW.geom = ST_SetSRID(ST_MakePoint(NEW.lon, NEW.lat), 4326);
+  ELSIF NEW.geom IS NOT NULL AND ST_SRID(NEW.geom) = 0 THEN
+    NEW.geom = ST_SetSRID(NEW.geom, 4326);
   END IF;
   NEW.updated_at = NOW();
   RETURN NEW;
@@ -267,6 +277,18 @@ CREATE TRIGGER trigger_assessment_geom
   BEFORE INSERT OR UPDATE ON assessments
   FOR EACH ROW
   EXECUTE FUNCTION update_assessment_geom();
+
+DO $$
+BEGIN
+  IF to_regclass('public.sites') IS NOT NULL THEN
+    ALTER TABLE assessments
+      ADD CONSTRAINT fk_assessments_site
+      FOREIGN KEY (site_id) REFERENCES sites(id) ON DELETE SET NULL;
+  END IF;
+EXCEPTION
+  WHEN duplicate_object THEN
+    NULL;
+END $$;
 
 -- =============================================================
 -- VERIFY

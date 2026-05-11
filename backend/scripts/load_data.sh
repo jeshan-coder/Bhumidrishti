@@ -13,6 +13,7 @@
 #   turkey_buildings     — OSM building polygons (Adiyaman + Hatay)
 #   flood_zones          — derived from waterway buffer (300m)
 #   assessments          — empty table, app writes here at runtime
+#   sites                — site-level workflow registry
 #
 # ALL original attributes preserved — nothing deleted or changed
 # province column added to turkey_lines, turkey_points,
@@ -64,6 +65,7 @@ echo "  destroyed_buildings  — earthquake destroyed buildings"
 echo "  turkey_buildings     — OSM building polygons"
 echo "  flood_zones          — derived from waterway buffer"
 echo "  assessments          — empty, app writes here"
+echo "  sites                — site-level workflow registry"
 echo ""
 echo "  All original attributes preserved"
 echo "============================================================"
@@ -557,6 +559,27 @@ ALTER TABLE assessments ADD COLUMN IF NOT EXISTS address_note TEXT;
 
 SQL
 
+# Add orthophoto pipeline columns to assessments.
+echo "  Running orthophoto column migrations..."
+PGPASSWORD="$DB_PASS" psql \
+  -h "$DB_HOST" -p "$DB_PORT" \
+  -U "$DB_USER" -d "$DB_NAME" \
+  -f /app/scripts/add_assessment_ortho_columns.sql
+
+# Create batches table.
+echo "  Creating batches table..."
+PGPASSWORD="$DB_PASS" psql \
+  -h "$DB_HOST" -p "$DB_PORT" \
+  -U "$DB_USER" -d "$DB_NAME" \
+  -f /app/scripts/add_batches_table.sql
+
+# Create sites table and link batches/assessments to sites.
+echo "  Creating sites table and site links..."
+PGPASSWORD="$DB_PASS" psql \
+  -h "$DB_HOST" -p "$DB_PORT" \
+  -U "$DB_USER" -d "$DB_NAME" \
+  -f /app/scripts/add_sites_table.sql
+
 echo -e "  ${GREEN}flood_zones created${NC}"
 echo -e "  ${GREEN}assessments table ready (preserved or created)${NC}"
 
@@ -569,7 +592,7 @@ PGPASSWORD="$DB_PASS" psql \
   -h "$DB_HOST" -p "$DB_PORT" \
   -U "$DB_USER" -d "$DB_NAME" << 'SQL'
 
--- Row counts for all 8 tables
+-- Row counts for all 9 tables
 SELECT 'turkey_lines'         AS table_name, COUNT(*) AS rows FROM turkey_lines
 UNION ALL
 SELECT 'turkey_points'        AS table_name, COUNT(*) AS rows FROM turkey_points
@@ -585,6 +608,10 @@ UNION ALL
 SELECT 'flood_zones'          AS table_name, COUNT(*) AS rows FROM flood_zones
 UNION ALL
 SELECT 'assessments'          AS table_name, COUNT(*) AS rows FROM assessments
+UNION ALL
+SELECT 'batches'              AS table_name, COUNT(*) AS rows FROM batches
+UNION ALL
+SELECT 'sites'                AS table_name, COUNT(*) AS rows FROM sites
 ORDER BY table_name;
 
 -- Rows per province for all province-tagged tables
@@ -636,6 +663,7 @@ echo "  destroyed_buildings  — earthquake damaged buildings"
 echo "  turkey_buildings     — all OSM building polygons"
 echo "  flood_zones          — 300m waterway buffer zones"
 echo "  assessments          — empty, app writes here"
+echo "  sites                — site-level workflow registry"
 echo ""
 echo "  All original attributes preserved"
 echo "  province column on all data tables"
