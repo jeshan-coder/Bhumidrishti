@@ -252,6 +252,9 @@ async def get_dashboard_metrics() -> dict[str, Any]:
             has_field_workers_table = bool(
                 await conn.fetchval("SELECT to_regclass('public.field_workers') IS NOT NULL")
             )
+            has_field_teams_table = bool(
+                await conn.fetchval("SELECT to_regclass('public.field_teams') IS NOT NULL")
+            )
             has_assessments_site_id = bool(
                 await conn.fetchval(
                     """
@@ -274,6 +277,19 @@ async def get_dashboard_metrics() -> dict[str, Any]:
                         WHERE table_schema = 'public'
                           AND table_name = 'assessments'
                           AND column_name = 'site_name'
+                    )
+                    """
+                )
+            )
+            has_batches_site_id = bool(
+                await conn.fetchval(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'batches'
+                          AND column_name = 'site_id'
                     )
                     """
                 )
@@ -447,6 +463,7 @@ async def get_dashboard_details() -> dict[str, Any]:
                 "severity_distribution": [],
                 "recent_activity": [],
                 "triage": [],
+                "field_teams": [],
                 "field_workers": [],
             }
         )
@@ -515,6 +532,9 @@ async def get_dashboard_details() -> dict[str, Any]:
             has_field_workers_table = bool(
                 await conn.fetchval("SELECT to_regclass('public.field_workers') IS NOT NULL")
             )
+            has_field_teams_table = bool(
+                await conn.fetchval("SELECT to_regclass('public.field_teams') IS NOT NULL")
+            )
             has_assessments_site_id = bool(
                 await conn.fetchval(
                     """
@@ -541,6 +561,19 @@ async def get_dashboard_details() -> dict[str, Any]:
                     """
                 )
             )
+            has_batches_site_id = bool(
+                await conn.fetchval(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'batches'
+                          AND column_name = 'site_id'
+                    )
+                    """
+                )
+            )
 
             try:
                 severity_rows = await conn.fetch(
@@ -557,16 +590,20 @@ async def get_dashboard_details() -> dict[str, Any]:
 
             if has_sites_table:
                 try:
+                    site_batch_join = (
+                        "b.site_id = s.id OR (b.site_id IS NULL AND LOWER(b.site_name) = LOWER(s.name))"
+                        if has_batches_site_id
+                        else "LOWER(b.site_name) = LOWER(s.name)"
+                    )
                     site_rows = await conn.fetch(
-                        """
+                        f"""
                         WITH site_batch_map AS (
                             SELECT
                                 s.id AS site_id,
                                 b.id AS batch_id
                             FROM sites s
                             LEFT JOIN batches b
-                              ON b.site_id = s.id
-                              OR (b.site_id IS NULL AND LOWER(b.site_name) = LOWER(s.name))
+                              ON {site_batch_join}
                         ),
                         site_assessment_map AS (
                             SELECT DISTINCT
@@ -610,8 +647,7 @@ async def get_dashboard_details() -> dict[str, Any]:
                                 b.created_at AS batch_created_at
                             FROM sites s
                             LEFT JOIN batches b
-                              ON b.site_id = s.id
-                              OR (b.site_id IS NULL AND LOWER(b.site_name) = LOWER(s.name))
+                              ON {site_batch_join}
                             ORDER BY s.id, b.created_at DESC NULLS LAST
                         ),
                         site_stats AS (
@@ -680,7 +716,7 @@ async def get_dashboard_details() -> dict[str, Any]:
                             a.severity,
                             a.osm_building_id,
                             COALESCE(NULLIF(s.name, ''), 'Unknown') AS site_name,
-                            COALESCE(NULLIF(a.worker_name, ''), 'Unknown') AS worker_name,
+                            COALESCE(NULLIF(a.response_team, ''), NULLIF(a.worker_name, ''), 'Unknown') AS worker_name,
                             a.input_type,
                             a.created_at,
                             FALSE AS signs_of_life
@@ -698,7 +734,7 @@ async def get_dashboard_details() -> dict[str, Any]:
                             a.severity,
                             a.osm_building_id,
                             'Unknown' AS site_name,
-                            COALESCE(NULLIF(a.worker_name, ''), 'Unknown') AS worker_name,
+                            COALESCE(NULLIF(a.response_team, ''), NULLIF(a.worker_name, ''), 'Unknown') AS worker_name,
                             a.input_type,
                             a.created_at,
                             FALSE AS signs_of_life
@@ -729,7 +765,7 @@ async def get_dashboard_details() -> dict[str, Any]:
                             a.severity,
                             a.osm_building_id,
                             COALESCE(NULLIF(s.name, ''), NULLIF(b.site_name, ''), 'Unknown') AS site_name,
-                            COALESCE(NULLIF(a.worker_name, ''), NULLIF(b.worker_name, ''), 'Unknown') AS worker_name,
+                            COALESCE(NULLIF(a.response_team, ''), NULLIF(a.worker_name, ''), NULLIF(b.worker_name, ''), 'Unknown') AS worker_name,
                             a.input_type,
                             a.status,
                             a.created_at,
@@ -753,7 +789,7 @@ async def get_dashboard_details() -> dict[str, Any]:
                             a.severity,
                             a.osm_building_id,
                             COALESCE(NULLIF(b.site_name, ''), 'Unknown') AS site_name,
-                            COALESCE(NULLIF(a.worker_name, ''), NULLIF(b.worker_name, ''), 'Unknown') AS worker_name,
+                            COALESCE(NULLIF(a.response_team, ''), NULLIF(a.worker_name, ''), NULLIF(b.worker_name, ''), 'Unknown') AS worker_name,
                             a.input_type,
                             a.status,
                             a.created_at,
@@ -773,12 +809,39 @@ async def get_dashboard_details() -> dict[str, Any]:
                 triage_rows = []
 
             try:
-                if has_field_workers_table:
+                if has_field_teams_table:
+                    worker_rows = await conn.fetch(
+                        """
+                        SELECT
+                            LOWER(TRIM(ft.name)) AS worker_key,
+                            ft.name AS worker_name,
+                            ft.name AS team_name,
+                            COALESCE(COUNT(ftm.id), 0)::int AS worker_count,
+                            COALESCE(
+                                ARRAY_AGG(ftm.worker_name ORDER BY LOWER(ftm.worker_name))
+                                FILTER (WHERE ftm.worker_name IS NOT NULL),
+                                ARRAY[]::text[]
+                            ) AS workers,
+                            0::int AS assessment_count,
+                            ft.updated_at AS last_activity_at,
+                            ft.status AS worker_status
+                        FROM field_teams ft
+                        LEFT JOIN field_team_members ftm ON ftm.team_id = ft.id
+                        GROUP BY ft.id, ft.name, ft.updated_at, ft.status
+                        ORDER BY
+                            CASE WHEN ft.status = 'available' THEN 0 ELSE 1 END,
+                            LOWER(ft.name)
+                        """
+                    )
+                elif has_field_workers_table:
                     worker_rows = await conn.fetch(
                         """
                         SELECT
                             LOWER(TRIM(name)) AS worker_key,
                             name AS worker_name,
+                            name AS team_name,
+                            1::int AS worker_count,
+                            ARRAY[name]::text[] AS workers,
                             0::int AS assessment_count,
                             updated_at AS last_activity_at,
                             status AS worker_status
@@ -794,6 +857,9 @@ async def get_dashboard_details() -> dict[str, Any]:
                         SELECT
                             LOWER(TRIM(worker_name)) AS worker_key,
                             MIN(TRIM(worker_name)) AS worker_name,
+                            MIN(TRIM(worker_name)) AS team_name,
+                            1::int AS worker_count,
+                            ARRAY[MIN(TRIM(worker_name))]::text[] AS workers,
                             COUNT(*)::int AS assessment_count,
                             MAX(created_at) AS last_activity_at,
                             'available'::text AS worker_status
@@ -808,9 +874,15 @@ async def get_dashboard_details() -> dict[str, Any]:
                 logger.warning("dashboard_worker_query_failed error=%s", exc)
                 worker_rows = []
 
-        sites = [
-            {
-                "site_name": row["site_name"],
+        deduped_sites: dict[str, dict[str, Any]] = {}
+        for row in site_rows:
+            raw_name = str(row["site_name"] or "Unknown")
+            normalized_name = " ".join(raw_name.split()).strip()
+            if not normalized_name:
+                normalized_name = "Unknown"
+            site_key = normalized_name.casefold()
+            site_payload = {
+                "site_name": normalized_name,
                 "status": row["site_status"],
                 "total_buildings": int(row["total_buildings"] or 0),
                 "assessed_buildings": int(row["assessed_buildings"] or 0),
@@ -823,8 +895,19 @@ async def get_dashboard_details() -> dict[str, Any]:
                     "sev1": int(row["sev1"] or 0),
                 },
             }
-            for row in site_rows
-        ]
+            existing = deduped_sites.get(site_key)
+            if existing is None:
+                deduped_sites[site_key] = site_payload
+                continue
+            # Keep the richer/more recent-looking row when duplicates exist.
+            if site_payload["assessed_buildings"] > existing["assessed_buildings"]:
+                deduped_sites[site_key] = site_payload
+            elif (
+                site_payload["assessed_buildings"] == existing["assessed_buildings"]
+                and site_payload["total_buildings"] > existing["total_buildings"]
+            ):
+                deduped_sites[site_key] = site_payload
+        sites = list(deduped_sites.values())
 
         severity_distribution = [
             {"severity": sev, "count": int(severity_counts.get(sev, 0))}
@@ -860,14 +943,28 @@ async def get_dashboard_details() -> dict[str, Any]:
             for row in triage_rows
         ]
 
+        field_teams: list[dict[str, Any]] = []
+        for row in worker_rows:
+            payload = dict(row)
+            field_teams.append(
+                {
+                    "team_name": payload.get("team_name") or payload.get("worker_name") or "Unknown",
+                    "worker_name": payload.get("worker_name") or "Unknown",
+                    "worker_count": int(payload.get("worker_count") or 0),
+                    "workers": [str(name) for name in (payload.get("workers") or []) if str(name).strip()],
+                    "assessment_count": int(payload.get("assessment_count") or 0),
+                    "last_activity_at": payload["last_activity_at"].isoformat() if payload.get("last_activity_at") else None,
+                    "status": payload.get("worker_status") or "available",
+                }
+            )
         field_workers = [
             {
-                "worker_name": row["worker_name"] or "Unknown",
-                "assessment_count": int(row["assessment_count"] or 0),
-                "last_activity_at": row["last_activity_at"].isoformat() if row["last_activity_at"] else None,
-                "status": row.get("worker_status") or "available",
+                "worker_name": item["team_name"],
+                "assessment_count": item["assessment_count"],
+                "last_activity_at": item["last_activity_at"],
+                "status": item["status"],
             }
-            for row in worker_rows
+            for item in field_teams
         ]
 
         return _success(
@@ -876,6 +973,7 @@ async def get_dashboard_details() -> dict[str, Any]:
                 "severity_distribution": severity_distribution,
                 "recent_activity": recent_activity,
                 "triage": triage,
+                "field_teams": field_teams,
                 "field_workers": field_workers,
             }
         )
@@ -887,6 +985,7 @@ async def get_dashboard_details() -> dict[str, Any]:
                 "severity_distribution": [],
                 "recent_activity": [],
                 "triage": [],
+                "field_teams": [],
                 "field_workers": [],
             }
         )

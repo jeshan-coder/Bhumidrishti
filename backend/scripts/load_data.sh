@@ -580,6 +580,13 @@ PGPASSWORD="$DB_PASS" psql \
   -U "$DB_USER" -d "$DB_NAME" \
   -f /app/scripts/add_sites_table.sql
 
+# Create reports table for generated report artifacts.
+echo "  Creating reports table..."
+PGPASSWORD="$DB_PASS" psql \
+  -h "$DB_HOST" -p "$DB_PORT" \
+  -U "$DB_USER" -d "$DB_NAME" \
+  -f /app/scripts/add_reports_table.sql
+
 echo -e "  ${GREEN}flood_zones created${NC}"
 echo -e "  ${GREEN}assessments table ready (preserved or created)${NC}"
 

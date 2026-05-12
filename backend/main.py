@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from db.postgres import init_pool, close_pool
-from routers import health_router, chat_router, gis_router, dem_router, assessment_router, upload_router, satellite_router, batch_router, dispatch_router
+from routers import health_router, chat_router, gis_router, dem_router, assessment_router, upload_router, satellite_router, batch_router, dispatch_router, report_router
 
 # This variable stores the backend-wide default log level.
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -95,6 +95,7 @@ async def _run_startup_migrations() -> None:
         END $$
         """,
         # Orthophoto pipeline columns (idempotent — IF NOT EXISTS)
+        "ALTER TABLE assessments ADD COLUMN IF NOT EXISTS site_id BIGINT",
         "ALTER TABLE assessments ADD COLUMN IF NOT EXISTS site_name VARCHAR(200)",
         "ALTER TABLE assessments ADD COLUMN IF NOT EXISTS pre_chip_path VARCHAR(500)",
         "ALTER TABLE assessments ADD COLUMN IF NOT EXISTS building_area_m2 FLOAT",
@@ -119,8 +120,10 @@ async def _run_startup_migrations() -> None:
             completed_at     TIMESTAMPTZ
         )
         """,
+        "ALTER TABLE batches ADD COLUMN IF NOT EXISTS site_id BIGINT",
         "CREATE INDEX IF NOT EXISTS idx_batches_status ON batches(status)",
         "CREATE INDEX IF NOT EXISTS idx_batches_area ON batches USING GIST(area_polygon)",
+        "CREATE INDEX IF NOT EXISTS idx_batches_site_id ON batches(site_id)",
         """
         CREATE TABLE IF NOT EXISTS field_workers (
             id BIGSERIAL PRIMARY KEY,
@@ -142,6 +145,67 @@ async def _run_startup_migrations() -> None:
         WHERE worker_name IS NOT NULL AND TRIM(worker_name) <> ''
         ON CONFLICT ((LOWER(name))) DO NOTHING
         """,
+        """
+        CREATE TABLE IF NOT EXISTS field_teams (
+            id BIGSERIAL PRIMARY KEY,
+            name VARCHAR(120) NOT NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'available',
+            current_assessment_id VARCHAR(50),
+            current_site_name VARCHAR(200),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            CONSTRAINT chk_field_teams_status CHECK (status IN ('available', 'busy'))
+        )
+        """,
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_field_teams_name_unique ON field_teams (LOWER(name))",
+        "CREATE INDEX IF NOT EXISTS idx_field_teams_status ON field_teams(status)",
+        """
+        CREATE TABLE IF NOT EXISTS field_team_members (
+            id BIGSERIAL PRIMARY KEY,
+            team_id BIGINT NOT NULL REFERENCES field_teams(id) ON DELETE CASCADE,
+            worker_name VARCHAR(120) NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """,
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_field_team_members_unique ON field_team_members(team_id, LOWER(worker_name))",
+        "CREATE INDEX IF NOT EXISTS idx_field_team_members_team_id ON field_team_members(team_id)",
+        """
+        INSERT INTO field_teams (name, status, current_assessment_id, current_site_name)
+        SELECT fw.name, fw.status, fw.current_assessment_id, fw.current_site_name
+        FROM field_workers fw
+        ON CONFLICT ((LOWER(name))) DO UPDATE
+        SET
+            status = EXCLUDED.status,
+            current_assessment_id = EXCLUDED.current_assessment_id,
+            current_site_name = EXCLUDED.current_site_name,
+            updated_at = NOW()
+        """,
+        """
+        INSERT INTO field_team_members (team_id, worker_name)
+        SELECT ft.id, ft.name
+        FROM field_teams ft
+        ON CONFLICT (team_id, LOWER(worker_name)) DO NOTHING
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS reports (
+            id            VARCHAR(20) PRIMARY KEY,
+            report_type   VARCHAR(20) NOT NULL,
+            site_id       VARCHAR(40),
+            assessment_id VARCHAR(50),
+            team_name     VARCHAR(100),
+            language      VARCHAR(10) DEFAULT 'en',
+            file_path     VARCHAR(500),
+            status        VARCHAR(20) NOT NULL DEFAULT 'generating',
+            created_by    VARCHAR(100),
+            error_message TEXT,
+            created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status)",
+        "CREATE INDEX IF NOT EXISTS idx_reports_created_at ON reports(created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_reports_type ON reports(report_type)",
+        "CREATE INDEX IF NOT EXISTS idx_reports_site_id ON reports(site_id)",
+        "CREATE INDEX IF NOT EXISTS idx_reports_assessment_id ON reports(assessment_id)",
     ]
     async with pool.acquire() as conn:
         for sql in migrations:
@@ -186,6 +250,7 @@ app.include_router(upload_router)
 app.include_router(satellite_router)
 app.include_router(batch_router)
 app.include_router(dispatch_router)
+app.include_router(report_router)
 
 # Serve chip images and uploaded files so the frontend can preview them.
 _uploads_dir = os.getenv("UPLOAD_DIR", "/app/data/uploads")

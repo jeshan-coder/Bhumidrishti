@@ -2,19 +2,17 @@
 
 import { useRef, useState } from "react"
 import type { ComponentPropsWithoutRef } from "react"
-import { MessageCircle, Pencil, RotateCcw } from "lucide-react"
+import { MessageSquare, Pencil, RotateCcw, X } from "lucide-react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
-import { streamChatRequest } from "@/lib/api/chat"
+import { streamChatRequest, type ChatMessagePayload } from "@/lib/api/chat"
 import { ThinkingBubble } from "@/components/chat/thinking-bubble"
 
-// This type defines one chat message rendered in the sidebar.
 type UiChatMessage = {
   role: "user" | "assistant"
   content: string
 }
 
-// This type defines parsed model output split into thinking and final answer parts.
 type ParsedModelStream = {
   thinking: string
   answer: string
@@ -22,11 +20,9 @@ type ParsedModelStream = {
   thinkingCompleted: boolean
 }
 
-// This function parses optional <think>...</think> segments from streamed model text.
 function parseModelStream(rawText: string): ParsedModelStream {
   const startTag = "<think>"
   const endTag = "</think>"
-
   const thinkStartIndex = rawText.indexOf(startTag)
   if (thinkStartIndex === -1) {
     return {
@@ -36,10 +32,8 @@ function parseModelStream(rawText: string): ParsedModelStream {
       thinkingCompleted: true,
     }
   }
-
   const contentAfterStart = rawText.slice(thinkStartIndex + startTag.length)
   const thinkEndIndex = contentAfterStart.indexOf(endTag)
-
   if (thinkEndIndex === -1) {
     return {
       thinking: contentAfterStart,
@@ -48,7 +42,6 @@ function parseModelStream(rawText: string): ParsedModelStream {
       thinkingCompleted: false,
     }
   }
-
   return {
     thinking: contentAfterStart.slice(0, thinkEndIndex),
     answer: contentAfterStart.slice(thinkEndIndex + endTag.length),
@@ -57,87 +50,64 @@ function parseModelStream(rawText: string): ParsedModelStream {
   }
 }
 
-// This type defines props for controlled sidebar state.
-type FieldMapChatSidebarProps = {
+type DashboardChatSidebarProps = {
   isOpen: boolean
   onOpenChange: (open: boolean) => void
-  onToolResult?: (toolName: string, result: Record<string, unknown>) => void
 }
 
-// This component renders the field map chat toggle button and chat sidebar.
-export function FieldMapChatSidebar({ isOpen, onOpenChange, onToolResult }: FieldMapChatSidebarProps) {
-  // This variable controls sidebar visibility (controlled by parent).
-  const isSidebarOpen = isOpen
+const DASHBOARD_CHAT_SYSTEM_PROMPT =
+  "You are BhumiDrishti dashboard coordinator assistant. Use tools for factual coordination actions. " +
+  "For dispatch requests: first check available teams using get_field_teams, do not dispatch to busy teams, " +
+  "use dispatch_assessments to assign and set responded, and use update_assessment_status for closed."
 
-  // This variable stores chat history for current map session.
+export function DashboardChatSidebar({ isOpen, onOpenChange }: DashboardChatSidebarProps) {
   const [messages, setMessages] = useState<UiChatMessage[]>([])
-
-  // This variable stores the pending user prompt.
   const [draftMessage, setDraftMessage] = useState("")
-
-  // This variable tracks active streaming request state.
   const [isSending, setIsSending] = useState(false)
-
-  // This variable stores live model thinking text emitted via SSE before/while response forms.
   const [thinkingText, setThinkingText] = useState("")
-
-  // This variable stores an active abort controller for mid-stream cancellation.
+  const [editingUserMessageIndex, setEditingUserMessageIndex] = useState<number | null>(null)
   const activeStreamAbortControllerRef = useRef<AbortController | null>(null)
 
-  // This variable tracks which user message is being edited before resend.
-  const [editingUserMessageIndex, setEditingUserMessageIndex] = useState<number | null>(null)
-
-  // This function identifies browser abort errors from cancelled streaming requests.
   const isAbortError = (error: unknown): boolean => {
-    if (error instanceof DOMException) {
-      return error.name === "AbortError"
-    }
-
+    if (error instanceof DOMException) return error.name === "AbortError"
     return error instanceof Error && error.name === "AbortError"
   }
 
-  // This function aborts the active stream and restores input controls.
   const handleStopStreaming = () => {
     activeStreamAbortControllerRef.current?.abort()
     setThinkingText("")
     setIsSending(false)
   }
 
-  // This function starts one streaming response from a prepared chat history.
   const streamAssistantResponse = async (nextMessages: UiChatMessage[]) => {
     const streamAbortController = new AbortController()
     activeStreamAbortControllerRef.current = streamAbortController
-
     setMessages([...nextMessages, { role: "assistant", content: "" }])
     setDraftMessage("")
     setIsSending(true)
     setThinkingText("Gemma4 is thinking...")
 
     try {
-      const chatPayload = nextMessages.map((message) => ({
-        role: message.role,
-        content: message.content,
-      }))
+      const chatPayload: ChatMessagePayload[] = [
+        { role: "system", content: DASHBOARD_CHAT_SYSTEM_PROMPT },
+        ...nextMessages.map((message) => ({
+          role: message.role,
+          content: message.content,
+        })),
+      ]
 
       let assistantReplyRaw = ""
-
       await streamChatRequest(
         chatPayload,
         {
-          onThinking: (text) => {
-            setThinkingText(text)
-          },
+          onThinking: (text) => setThinkingText(text),
           onToolCall: (toolName, args) => {
             const argsPreview = Object.keys(args).length > 0 ? ` ${JSON.stringify(args)}` : ""
             setThinkingText(`Calling tool: ${toolName}${argsPreview}`)
           },
-          onToolResult: (toolName, result) => {
-            onToolResult?.(toolName, result)
-          },
           onToken: (token) => {
             assistantReplyRaw += token
             const parsed = parseModelStream(assistantReplyRaw)
-
             setMessages((currentMessages) => {
               const updated = [...currentMessages]
               const lastIndex = updated.length - 1
@@ -161,19 +131,14 @@ export function FieldMapChatSidebar({ isOpen, onOpenChange, onToolResult }: Fiel
                 const updated = [...currentMessages]
                 const lastIndex = updated.length - 1
                 if (lastIndex >= 0 && updated[lastIndex].role === "assistant") {
-                  updated[lastIndex] = {
-                    ...updated[lastIndex],
-                    content: "No response from model.",
-                  }
+                  updated[lastIndex] = { ...updated[lastIndex], content: "No response from model." }
                 }
                 return updated
               })
             }
           },
         },
-        {
-          signal: streamAbortController.signal,
-        }
+        { signal: streamAbortController.signal }
       )
     } catch (error) {
       if (isAbortError(error)) {
@@ -181,16 +146,12 @@ export function FieldMapChatSidebar({ isOpen, onOpenChange, onToolResult }: Fiel
           const updated = [...currentMessages]
           const lastIndex = updated.length - 1
           if (lastIndex >= 0 && updated[lastIndex].role === "assistant" && !updated[lastIndex].content.trim()) {
-            updated[lastIndex] = {
-              ...updated[lastIndex],
-              content: "Response stopped.",
-            }
+            updated[lastIndex] = { ...updated[lastIndex], content: "Response stopped." }
           }
           return updated
         })
         return
       }
-
       const message = error instanceof Error ? error.message : "Failed to contact AI endpoint"
       setMessages((currentMessages) => [
         ...currentMessages.filter(
@@ -207,68 +168,51 @@ export function FieldMapChatSidebar({ isOpen, onOpenChange, onToolResult }: Fiel
     }
   }
 
-  // This function streams a message to backend and updates UI incrementally.
   const handleSendMessage = async () => {
     const trimmed = draftMessage.trim()
-    if (!trimmed || isSending) {
-      return
-    }
-
+    if (!trimmed || isSending) return
     const nextUserMessage: UiChatMessage = { role: "user", content: trimmed }
-
     if (editingUserMessageIndex !== null) {
       const conversationBeforeEdit = messages.slice(0, editingUserMessageIndex)
       setEditingUserMessageIndex(null)
       await streamAssistantResponse([...conversationBeforeEdit, nextUserMessage])
       return
     }
-
     await streamAssistantResponse([...messages, nextUserMessage])
   }
 
-  // This function retries a selected user message and regenerates from that point.
   const handleRetryMessage = async (userMessageIndex: number) => {
-    if (isSending) {
-      return
-    }
-
+    if (isSending) return
     const selectedMessage = messages[userMessageIndex]
-    if (!selectedMessage || selectedMessage.role !== "user") {
-      return
-    }
-
+    if (!selectedMessage || selectedMessage.role !== "user") return
     const conversationBeforeRetry = messages.slice(0, userMessageIndex)
     await streamAssistantResponse([...conversationBeforeRetry, selectedMessage])
   }
 
-  // This function pre-fills the input to edit a selected user question.
   const handleEditMessage = (userMessageIndex: number) => {
-    if (isSending) {
-      return
-    }
-
+    if (isSending) return
     const selectedMessage = messages[userMessageIndex]
-    if (!selectedMessage || selectedMessage.role !== "user") {
-      return
-    }
-
+    if (!selectedMessage || selectedMessage.role !== "user") return
     setEditingUserMessageIndex(userMessageIndex)
     setDraftMessage(selectedMessage.content)
   }
 
   return (
     <>
-      <button
-        type="button"
-        onClick={() => onOpenChange(true)}
-        className="absolute left-4 top-4 z-20 rounded-md border border-[#0a5d49] bg-[#0F6E56] p-2 text-white shadow-sm transition-colors hover:bg-[#085041]"
-        aria-label="Open chat sidebar"
-      >
-        <MessageCircle size={18} />
-      </button>
+      {!isOpen ? (
+        <button
+          type="button"
+          onClick={() => onOpenChange(true)}
+          className="fixed right-4 top-16 z-40 flex items-center gap-1 rounded-md border border-[#0a5d49] bg-[#0F6E56] px-3 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-[#085041]"
+          aria-label="Open dashboard chat"
+        >
+          <MessageSquare size={15} />
+          Chat
+        </button>
+      ) : null}
 
-      {isSidebarOpen ? (
-        <aside className="absolute left-0 top-0 z-30 flex h-full w-full max-w-sm flex-col border-r border-[#D3D1C7] bg-[#FAFAF8] shadow-xl">
+      {isOpen ? (
+        <aside className="fixed right-0 top-[49px] z-40 flex h-[calc(100dvh-49px)] w-full max-w-sm flex-col border-l border-[#D3D1C7] bg-[#FAFAF8] shadow-xl">
           <div className="flex items-center justify-between border-b border-[#D3D1C7] px-4 py-3">
             <h2 className="text-sm font-semibold text-[#085041]">Gemma4 Assistant</h2>
             <button
@@ -276,13 +220,13 @@ export function FieldMapChatSidebar({ isOpen, onOpenChange, onToolResult }: Fiel
               onClick={() => onOpenChange(false)}
               className="rounded-md px-2 py-1 text-xs font-medium text-[#085041] hover:bg-[#E1F5EE]"
             >
-              Close
+              <X size={14} />
             </button>
           </div>
 
           <div className="flex-1 space-y-2 overflow-y-auto p-4">
             {messages.length === 0 ? (
-              <p className="text-xs text-[#5a6b65]">Start by asking Gemma4 about this field area.</p>
+              <p className="text-xs text-[#5a6b65]">Ask about triage priorities, dispatch, or close actions.</p>
             ) : null}
 
             {messages.map((message, index) => (

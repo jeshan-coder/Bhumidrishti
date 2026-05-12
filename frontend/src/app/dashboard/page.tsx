@@ -3,13 +3,14 @@
 import { useEffect, useState } from "react"
 import {
   closeAssessment,
-  createFieldWorker,
-  dispatchAssessmentToWorker,
-  fetchFieldWorkers,
-  type FieldWorker as DispatchWorker,
+  closeSiteAssessments,
+  createFieldTeam,
+  dispatchSiteToTeam,
+  fetchFieldTeams,
+  type FieldTeam as DispatchTeam,
 } from "@/lib/api/dispatch"
 import { toast } from "sonner"
-import { FieldMapChatSidebar } from "@/components/maps/field-map-chat-sidebar"
+import { DashboardChatSidebar } from "@/components/dashboard/dashboard-chat-sidebar"
 
 type DashboardMetrics = {
   total_assessed: number
@@ -24,7 +25,8 @@ type DashboardDetails = {
   severity_distribution: SeverityBar[]
   recent_activity: ActivityItem[]
   triage: TriageItem[]
-  field_workers: FieldWorker[]
+  field_teams: FieldWorker[]
+  field_workers?: FieldWorker[]
 }
 
 type SiteCardData = {
@@ -63,7 +65,10 @@ type TriageItem = ActivityItem & {
 }
 
 type FieldWorker = {
+  team_name?: string
   worker_name: string
+  worker_count?: number
+  workers?: string[]
   assessment_count: number
   last_activity_at: string | null
   status?: "available" | "busy"
@@ -79,6 +84,7 @@ const EMPTY_DETAILS: DashboardDetails = {
   severity_distribution: [],
   recent_activity: [],
   triage: [],
+  field_teams: [],
   field_workers: [],
 }
 
@@ -127,14 +133,17 @@ export default function DashboardPage() {
   const [selectedSiteFilter, setSelectedSiteFilter] = useState<string>("All")
   const [selectedStatusFilter, setSelectedStatusFilter] = useState<string>("All")
   const [isChatSidebarOpen, setIsChatSidebarOpen] = useState(false)
-  const [dispatchWorkers, setDispatchWorkers] = useState<DispatchWorker[]>([])
-  const [dispatchTarget, setDispatchTarget] = useState<TriageItem | null>(null)
+  const [dispatchWorkers, setDispatchWorkers] = useState<DispatchTeam[]>([])
+  const [dispatchTargetSite, setDispatchTargetSite] = useState<string | null>(null)
   const [selectedWorkerName, setSelectedWorkerName] = useState("")
   const [newWorkerName, setNewWorkerName] = useState("")
-  const [dispatchBusyId, setDispatchBusyId] = useState<string | null>(null)
+  const [dispatchBusySite, setDispatchBusySite] = useState<string | null>(null)
+  const [closeBusySite, setCloseBusySite] = useState<string | null>(null)
   const [closeBusyId, setCloseBusyId] = useState<string | null>(null)
   const [showAddWorkerDialog, setShowAddWorkerDialog] = useState(false)
   const [addWorkerName, setAddWorkerName] = useState("")
+  const [addTeamWorkers, setAddTeamWorkers] = useState<string[]>([])
+  const [addTeamWorkerInput, setAddTeamWorkerInput] = useState("")
   const [addWorkerBusy, setAddWorkerBusy] = useState(false)
 
   useEffect(() => {
@@ -146,7 +155,7 @@ export default function DashboardPage() {
         const [metricsRes, detailsRes, workers] = await Promise.all([
           fetch(`${API_BASE}/batch/dashboard-metrics`),
           fetch(`${API_BASE}/batch/dashboard-details`),
-          fetchFieldWorkers().catch(() => []),
+          fetchFieldTeams().catch(() => []),
         ])
         const metricsJson = await metricsRes.json()
         const detailsJson = await detailsRes.json()
@@ -186,40 +195,65 @@ export default function DashboardPage() {
     ...Array.from(new Set(details.triage.map((item) => item.site_name).filter(Boolean))).sort(),
   ]
   const triageStatuses = ["All", "pending", "responded"]
-  const filteredTriage =
-    details.triage.filter((item) => {
-      const siteMatch = selectedSiteFilter === "All" || item.site_name === selectedSiteFilter
-      const statusMatch =
-        selectedStatusFilter === "All" ||
-        String(item.status || "")
-          .toLowerCase()
-          .trim() === selectedStatusFilter
-      return siteMatch && statusMatch
-    })
+  const filteredTriage = details.triage.filter((item) => {
+    const siteMatch = selectedSiteFilter === "All" || item.site_name === selectedSiteFilter
+    const statusMatch =
+      selectedStatusFilter === "All" ||
+      String(item.status || "")
+        .toLowerCase()
+        .trim() === selectedStatusFilter
+    return siteMatch && statusMatch
+  })
+  const dispatchSites = Array.from(
+    filteredTriage.reduce((acc, item) => {
+      const key = item.site_name.trim()
+      if (!key || key.toLowerCase() === "unknown") return acc
+      const existing = acc.get(key) ?? { site_name: key, pending_count: 0, total_count: 0 }
+      existing.total_count += 1
+      if ((item.status || "").toLowerCase().trim() === "pending") {
+        existing.pending_count += 1
+      }
+      acc.set(key, existing)
+      return acc
+    }, new Map<string, { site_name: string; pending_count: number; total_count: number }>())
+  ).map((entry) => entry[1])
   const severityMax = Math.max(1, ...details.severity_distribution.map((row) => row.count))
+  const fieldTeams: FieldWorker[] =
+    details.field_teams.length > 0
+      ? details.field_teams
+      : (details.field_workers ?? []).map((worker) => ({
+          ...worker,
+          team_name: worker.worker_name,
+          worker_count: worker.worker_count ?? 1,
+          workers: worker.workers ?? [worker.worker_name],
+        }))
 
   async function handleDispatch() {
-    if (!dispatchTarget || dispatchBusyId) return
-    const worker = newWorkerName.trim() || selectedWorkerName.trim()
-    if (!worker) return
+    if (!dispatchTargetSite || dispatchBusySite) return
+    const teamName = newWorkerName.trim() || selectedWorkerName.trim()
+    if (!teamName) return
+    if (dispatchTargetSite.toLowerCase() === "unknown") {
+      toast.error("Cannot dispatch unknown site")
+      return
+    }
     try {
-      setDispatchBusyId(dispatchTarget.assessment_id)
-      await dispatchAssessmentToWorker(dispatchTarget.assessment_id, worker, true)
-      setDispatchTarget(null)
+      setDispatchBusySite(dispatchTargetSite)
+      const dispatchResult = await dispatchSiteToTeam(dispatchTargetSite, teamName, 200)
+      setDispatchTargetSite(null)
       setSelectedWorkerName("")
       setNewWorkerName("")
-      const [workers] = await Promise.all([fetchFieldWorkers().catch(() => [])])
+      const [workers] = await Promise.all([fetchFieldTeams().catch(() => [])])
       setDispatchWorkers(workers)
       const detailsRes = await fetch(`${API_BASE}/batch/dashboard-details`)
       const detailsJson = await detailsRes.json()
       if (detailsJson.success) setDetails((detailsJson.data as DashboardDetails) ?? EMPTY_DETAILS)
-      toast.success(`Dispatched to ${worker}`)
+      toast.success(`Dispatched ${dispatchResult.updated_count} buildings in ${dispatchTargetSite} to ${teamName}`)
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Dispatch failed"
       setError(msg)
       toast.error(msg)
     } finally {
-      setDispatchBusyId(null)
+      setDispatchBusySite(null)
     }
   }
 
@@ -228,7 +262,7 @@ export default function DashboardPage() {
     try {
       setCloseBusyId(assessmentId)
       await closeAssessment(assessmentId)
-      const [workers] = await Promise.all([fetchFieldWorkers().catch(() => [])])
+      const [workers] = await Promise.all([fetchFieldTeams().catch(() => [])])
       setDispatchWorkers(workers)
       const detailsRes = await fetch(`${API_BASE}/batch/dashboard-details`)
       const detailsJson = await detailsRes.json()
@@ -243,22 +277,49 @@ export default function DashboardPage() {
     }
   }
 
-  async function handleAddWorker() {
-    const name = addWorkerName.trim()
-    if (!name || addWorkerBusy) return
+  async function handleCloseSite(siteName: string) {
+    if (closeBusySite) return
     try {
-      setAddWorkerBusy(true)
-      const worker = await createFieldWorker(name)
-      setAddWorkerName("")
-      setShowAddWorkerDialog(false)
-      const [workers] = await Promise.all([fetchFieldWorkers().catch(() => [])])
+      setCloseBusySite(siteName)
+      const closeResult = await closeSiteAssessments(
+        siteName,
+        selectedStatusFilter !== "All" ? selectedStatusFilter : undefined,
+        200
+      )
+      const [workers] = await Promise.all([fetchFieldTeams().catch(() => [])])
       setDispatchWorkers(workers)
       const detailsRes = await fetch(`${API_BASE}/batch/dashboard-details`)
       const detailsJson = await detailsRes.json()
       if (detailsJson.success) setDetails((detailsJson.data as DashboardDetails) ?? EMPTY_DETAILS)
-      toast.success(`Worker ${worker.name} added as available`)
+      toast.success(`Closed ${closeResult.updated_count} buildings in ${siteName}`)
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Failed to add worker"
+      const msg = err instanceof Error ? err.message : "Close by site failed"
+      setError(msg)
+      toast.error(msg)
+    } finally {
+      setCloseBusySite(null)
+    }
+  }
+
+  async function handleAddWorker() {
+    const name = addWorkerName.trim()
+    const workers = Array.from(new Set(addTeamWorkers.map((item) => item.trim()).filter(Boolean)))
+    if (!name || workers.length === 0 || addWorkerBusy) return
+    try {
+      setAddWorkerBusy(true)
+      const worker = await createFieldTeam(name, workers)
+      setAddWorkerName("")
+      setAddTeamWorkers([])
+      setAddTeamWorkerInput("")
+      setShowAddWorkerDialog(false)
+      const [latestTeams] = await Promise.all([fetchFieldTeams().catch(() => [])])
+      setDispatchWorkers(latestTeams)
+      const detailsRes = await fetch(`${API_BASE}/batch/dashboard-details`)
+      const detailsJson = await detailsRes.json()
+      if (detailsJson.success) setDetails((detailsJson.data as DashboardDetails) ?? EMPTY_DETAILS)
+      toast.success(`Team ${worker.name} added as available`)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to add field team"
       setError(msg)
       toast.error(msg)
     } finally {
@@ -266,9 +327,23 @@ export default function DashboardPage() {
     }
   }
 
+  function handleAddTeamMember() {
+    const memberName = addTeamWorkerInput.trim()
+    if (!memberName) return
+    setAddTeamWorkers((prev) => {
+      const exists = prev.some((item) => item.toLowerCase() === memberName.toLowerCase())
+      return exists ? prev : [...prev, memberName]
+    })
+    setAddTeamWorkerInput("")
+  }
+
+  function handleRemoveTeamMember(memberName: string) {
+    setAddTeamWorkers((prev) => prev.filter((item) => item !== memberName))
+  }
+
   return (
     <main className="relative min-h-[calc(100dvh-49px)] w-full bg-[#FAFAF8] p-6 lg:p-10">
-      <div className="mx-auto max-w-7xl">
+      <div className={`mx-auto max-w-7xl transition-[padding] duration-300 ${isChatSidebarOpen ? "xl:pr-[24rem]" : ""}`}>
         {error && (
           <div className="mb-6 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
             {error}
@@ -435,6 +510,40 @@ export default function DashboardPage() {
                       </button>
                     ))}
                   </div>
+                  <div className="mb-3 space-y-2 rounded-lg border border-[#EEEADD] bg-[#FAFAF8] p-2">
+                    <p className="text-[11px] font-semibold text-[#17352b]">Dispatch by site</p>
+                    <div className="max-h-28 space-y-1 overflow-y-auto pr-1">
+                      {dispatchSites.length === 0 ? (
+                        <p className="text-[11px] text-[#6b7280]">No sites available for current filters.</p>
+                      ) : (
+                        dispatchSites.map((site) => (
+                          <div key={site.site_name} className="flex items-center justify-between rounded bg-white px-2 py-1">
+                            <p className="text-[11px] text-[#17352b]">
+                              {site.site_name} · {site.pending_count} pending / {site.total_count} total
+                            </p>
+                            <button
+                              onClick={() => {
+                                setDispatchTargetSite(site.site_name)
+                                setSelectedWorkerName("")
+                                setNewWorkerName("")
+                              }}
+                              disabled={dispatchBusySite === site.site_name || site.pending_count === 0}
+                              className="rounded-md bg-[#0F6E56] px-2 py-0.5 text-[10px] font-semibold text-white disabled:opacity-50"
+                            >
+                              {dispatchBusySite === site.site_name ? "Dispatching..." : "Dispatch site"}
+                            </button>
+                            <button
+                              onClick={() => void handleCloseSite(site.site_name)}
+                              disabled={closeBusySite === site.site_name || site.total_count === 0}
+                              className="rounded-md bg-slate-700 px-2 py-0.5 text-[10px] font-semibold text-white disabled:opacity-50"
+                            >
+                              {closeBusySite === site.site_name ? "Closing..." : "Close site"}
+                            </button>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
                   <div className="max-h-72 space-y-2 overflow-y-auto pr-1">
                     {filteredTriage.map((item) => (
                       <div key={item.assessment_id} className="rounded-lg border border-[#EEEADD] px-3 py-2">
@@ -463,17 +572,6 @@ export default function DashboardPage() {
                         </p>
                         <div className="mt-2 flex flex-wrap gap-2">
                           <button
-                            onClick={() => {
-                              setDispatchTarget(item)
-                              setSelectedWorkerName("")
-                              setNewWorkerName("")
-                            }}
-                            disabled={dispatchBusyId === item.assessment_id || item.status.toLowerCase() === "closed"}
-                            className="rounded-md bg-[#0F6E56] px-2.5 py-1 text-[11px] font-semibold text-white disabled:opacity-50"
-                          >
-                            {dispatchBusyId === item.assessment_id ? "Dispatching..." : "Dispatch"}
-                          </button>
-                          <button
                             onClick={() => void handleClose(item.assessment_id)}
                             disabled={closeBusyId === item.assessment_id || item.status.toLowerCase() === "closed"}
                             className="rounded-md bg-slate-700 px-2.5 py-1 text-[11px] font-semibold text-white disabled:opacity-50"
@@ -484,10 +582,10 @@ export default function DashboardPage() {
                       </div>
                     ))}
                   </div>
-                  {dispatchTarget && (
+                  {dispatchTargetSite && (
                     <div className="mt-3 rounded-lg border border-[#D9D6CB] bg-[#F8F7F2] p-3">
                       <p className="text-xs font-semibold text-[#17352b]">
-                        Dispatch {dispatchTarget.building_id ? `OSM:${dispatchTarget.building_id}` : dispatchTarget.assessment_id}
+                        Dispatch all pending buildings in site: {dispatchTargetSite}
                       </p>
                       <div className="mt-2 grid grid-cols-1 gap-2">
                         <select
@@ -495,7 +593,7 @@ export default function DashboardPage() {
                           onChange={(e) => setSelectedWorkerName(e.target.value)}
                           className="h-9 rounded-md border border-[#D9D6CB] bg-white px-2 text-xs"
                         >
-                          <option value="">Select available worker</option>
+                          <option value="">Select available team</option>
                           {dispatchWorkers.map((worker) => (
                             <option
                               key={worker.id}
@@ -509,20 +607,20 @@ export default function DashboardPage() {
                         <input
                           value={newWorkerName}
                           onChange={(e) => setNewWorkerName(e.target.value)}
-                          placeholder="Or type new worker name"
+                          placeholder="Or type existing team name"
                           className="h-9 rounded-md border border-[#D9D6CB] bg-white px-2 text-xs"
                         />
                         <div className="flex gap-2">
                           <button
                             onClick={() => void handleDispatch()}
-                            disabled={dispatchBusyId != null || (!selectedWorkerName && !newWorkerName.trim())}
+                            disabled={dispatchBusySite != null || (!selectedWorkerName && !newWorkerName.trim())}
                             className="rounded-md bg-[#0F6E56] px-3 py-1 text-xs font-semibold text-white disabled:opacity-50"
                           >
                             Confirm dispatch
                           </button>
                           <button
                             onClick={() => {
-                              setDispatchTarget(null)
+                              setDispatchTargetSite(null)
                               setSelectedWorkerName("")
                               setNewWorkerName("")
                             }}
@@ -538,25 +636,31 @@ export default function DashboardPage() {
 
                 <div className="rounded-2xl border border-[#D9D6CB] bg-white p-4 shadow-sm">
                   <div className="mb-3 flex items-center justify-between gap-2">
-                    <h2 className="text-sm font-semibold text-[#17352b]">Field workers</h2>
+                    <h2 className="text-sm font-semibold text-[#17352b]">Field teams</h2>
                     <button
-                      onClick={() => setShowAddWorkerDialog(true)}
+                      onClick={() => {
+                        setAddWorkerName("")
+                        setAddTeamWorkers([])
+                        setAddTeamWorkerInput("")
+                        setShowAddWorkerDialog(true)
+                      }}
                       className="flex h-6 w-6 items-center justify-center rounded-full bg-[#0F6E56] text-sm font-bold text-white"
-                      aria-label="Add field worker"
-                      title="Add field worker"
+                      aria-label="Add field team"
+                      title="Add field team"
                     >
                       +
                     </button>
                   </div>
                   <div className="space-y-2">
-                    {details.field_workers.map((worker) => {
+                    {fieldTeams.map((worker) => {
                       const workerStatus = (worker.status ?? "available").toLowerCase()
                       const available = workerStatus === "available"
+                      const teamName = worker.team_name ?? worker.worker_name
                       return (
-                        <div key={worker.worker_name} className="flex items-center justify-between rounded-lg border border-[#EEEADD] px-3 py-2">
+                        <div key={teamName} className="flex items-center justify-between rounded-lg border border-[#EEEADD] px-3 py-2">
                           <div className="flex items-center gap-2">
                             <div className="flex h-7 w-7 items-center justify-center rounded-full bg-[#E8E5DA] text-[11px] font-semibold text-[#17352b]">
-                              {worker.worker_name
+                              {teamName
                                 .split(" ")
                                 .filter(Boolean)
                                 .slice(0, 2)
@@ -564,10 +668,13 @@ export default function DashboardPage() {
                                 .join("")}
                             </div>
                             <div>
-                              <p className="text-xs font-medium text-[#17352b]">{worker.worker_name}</p>
+                              <p className="text-xs font-medium text-[#17352b]">{teamName}</p>
                               <p className="text-[11px] text-[#6b7280]">
-                                {available ? "Available" : "Busy"} · {worker.assessment_count} assessments
+                                {available ? "Available" : "Busy"} · {worker.worker_count ?? 1} workers · {worker.assessment_count} assessments
                               </p>
+                              {!!worker.workers?.length && (
+                                <p className="text-[11px] text-[#6b7280]">Members: {worker.workers.join(", ")}</p>
+                              )}
                             </div>
                           </div>
                           <span className={`h-2.5 w-2.5 rounded-full ${available ? "bg-emerald-500" : "bg-amber-500"}`} />
@@ -580,20 +687,67 @@ export default function DashboardPage() {
                 {showAddWorkerDialog && (
                   <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
                     <div className="w-full max-w-sm rounded-xl border border-[#D9D6CB] bg-white p-4 shadow-lg">
-                      <h3 className="text-sm font-semibold text-[#17352b]">Add field worker</h3>
+                      <h3 className="text-sm font-semibold text-[#17352b]">Add field team</h3>
                       <input
                         autoFocus
                         value={addWorkerName}
                         onChange={(e) => setAddWorkerName(e.target.value)}
-                        placeholder="Worker name"
+                        placeholder="Team name"
                         className="mt-3 h-9 w-full rounded-md border border-[#D9D6CB] bg-white px-3 text-xs outline-none focus:border-[#0F6E56]"
                       />
+                      <div className="mt-2 space-y-2">
+                        <label className="block text-xs font-semibold text-[#17352b]">Field workers</label>
+                        <div className="flex gap-2">
+                          <input
+                            value={addTeamWorkerInput}
+                            onChange={(e) => setAddTeamWorkerInput(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault()
+                                handleAddTeamMember()
+                              }
+                            }}
+                            placeholder="Worker name"
+                            className="h-9 flex-1 rounded-md border border-[#D9D6CB] bg-white px-3 text-xs outline-none focus:border-[#0F6E56]"
+                          />
+                          <button
+                            type="button"
+                            onClick={handleAddTeamMember}
+                            disabled={!addTeamWorkerInput.trim()}
+                            className="h-9 rounded-md bg-[#0F6E56] px-3 text-sm font-bold text-white disabled:opacity-50"
+                            aria-label="Add worker to team"
+                            title="Add worker"
+                          >
+                            +
+                          </button>
+                        </div>
+                        <div className="max-h-24 space-y-1 overflow-y-auto rounded-md border border-[#EEEADD] bg-[#FAFAF8] p-2">
+                          {addTeamWorkers.length === 0 ? (
+                            <p className="text-[11px] text-[#6b7280]">Add at least one worker</p>
+                          ) : (
+                            addTeamWorkers.map((member) => (
+                              <div key={member} className="flex items-center justify-between rounded bg-white px-2 py-1 text-xs">
+                                <span className="text-[#17352b]">{member}</span>
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemoveTeamMember(member)}
+                                  className="text-[11px] font-semibold text-red-600"
+                                >
+                                  Remove
+                                </button>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      </div>
                       <div className="mt-3 flex justify-end gap-2">
                         <button
                           onClick={() => {
                             if (addWorkerBusy) return
                             setShowAddWorkerDialog(false)
                             setAddWorkerName("")
+                            setAddTeamWorkers([])
+                            setAddTeamWorkerInput("")
                           }}
                           className="rounded-md bg-zinc-200 px-3 py-1.5 text-xs font-semibold text-zinc-800"
                         >
@@ -601,7 +755,7 @@ export default function DashboardPage() {
                         </button>
                         <button
                           onClick={() => void handleAddWorker()}
-                          disabled={addWorkerBusy || !addWorkerName.trim()}
+                          disabled={addWorkerBusy || !addWorkerName.trim() || addTeamWorkers.length === 0}
                           className="rounded-md bg-[#0F6E56] px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
                         >
                           {addWorkerBusy ? "Adding..." : "Add"}
@@ -616,7 +770,7 @@ export default function DashboardPage() {
           </>
         )}
       </div>
-      <FieldMapChatSidebar isOpen={isChatSidebarOpen} onOpenChange={setIsChatSidebarOpen} />
+      <DashboardChatSidebar isOpen={isChatSidebarOpen} onOpenChange={setIsChatSidebarOpen} />
     </main>
   )
 }

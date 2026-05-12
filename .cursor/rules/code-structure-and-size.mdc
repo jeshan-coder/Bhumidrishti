@@ -1,0 +1,25 @@
+---
+description: Keep code modular and avoid lengthy files
+alwaysApply: true
+---
+
+# Code Structure and File Size
+
+## Core Principle
+- Prefer clean, modular structure over quick monolithic edits.
+
+## Organization
+- If a file starts becoming too large or mixed-responsibility, split logic into focused modules.
+- Create new packages/folders/components when it improves clarity and ownership.
+- Keep UI components small and composable; extract reusable pieces early.
+- Keep backend services focused; move unrelated logic into dedicated service/helper modules.
+
+## File Length Guidance
+- Avoid adding substantial logic to already long files.
+- Prefer extracting new functions/classes/hooks/components rather than extending large files.
+- Keep each file scoped to a single primary concern.
+
+## While Implementing Changes
+- Preserve existing behavior while refactoring for structure.
+- Favor incremental extraction over risky large rewrites.
+- Keep imports and module boundaries clean and explicit.

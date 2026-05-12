@@ -6,6 +6,7 @@ import { PMTiles, Protocol } from "pmtiles"
 import { Map, MapPin, Route, MapPinned, Building, Droplets, AlertTriangle, Mountain, SatelliteDish, ImageIcon, X, Loader2, ChevronRight } from "lucide-react"
 import { toast } from "sonner"
 import { FieldMapChatSidebar } from "@/components/maps/field-map-chat-sidebar"
+import { FeatureInfoSidebar, type SelectedFeatureInfo } from "@/components/maps/feature-info-sidebar"
 import { MapDrawControls } from "@/components/maps/map-draw-controls"
 import { PendingBatchCards } from "@/components/maps/pending-batch-cards"
 import { fetchGisLayer, type GeoJsonFeatureCollection, type GisLayerKey } from "@/lib/api/gis-layers"
@@ -404,14 +405,259 @@ function collectLngLatPairsFromGeoJsonGeometry(
   return pairs
 }
 
+const AI_CHAT_RESULT_SOURCE_ID = "ai-chat-result-source"
+const AI_CHAT_RESULT_FILL_LAYER_ID = "ai-chat-result-fill"
+const AI_CHAT_RESULT_LINE_LAYER_ID = "ai-chat-result-line"
+const AI_CHAT_RESULT_POINT_LAYER_ID = "ai-chat-result-point"
+
+function createEmptyFeatureCollection(): GeoJsonFeatureCollection {
+  return { type: "FeatureCollection", features: [] } as GeoJsonFeatureCollection
+}
+
+function isGeometryCandidate(value: unknown): value is { type: string; coordinates: unknown } {
+  if (!value || typeof value !== "object") return false
+  const geometry = value as { type?: unknown; coordinates?: unknown }
+  return typeof geometry.type === "string" && geometry.coordinates !== undefined
+}
+
+function ensureAiChatResultLayers(map: maplibregl.Map): void {
+  if (!map.getSource(AI_CHAT_RESULT_SOURCE_ID)) {
+    map.addSource(AI_CHAT_RESULT_SOURCE_ID, {
+      type: "geojson",
+      data: createEmptyFeatureCollection(),
+    })
+  }
+
+  if (!map.getLayer(AI_CHAT_RESULT_FILL_LAYER_ID)) {
+    map.addLayer({
+      id: AI_CHAT_RESULT_FILL_LAYER_ID,
+      type: "fill",
+      source: AI_CHAT_RESULT_SOURCE_ID,
+      filter: ["in", ["geometry-type"], ["literal", ["Polygon", "MultiPolygon"]]],
+      paint: {
+        "fill-color": "#F59E0B",
+        "fill-opacity": 0.22,
+        "fill-outline-color": "#B45309",
+      },
+    })
+  }
+
+  if (!map.getLayer(AI_CHAT_RESULT_LINE_LAYER_ID)) {
+    map.addLayer({
+      id: AI_CHAT_RESULT_LINE_LAYER_ID,
+      type: "line",
+      source: AI_CHAT_RESULT_SOURCE_ID,
+      filter: ["in", ["geometry-type"], ["literal", ["LineString", "MultiLineString"]]],
+      paint: {
+        "line-color": "#EA580C",
+        "line-width": 3,
+        "line-opacity": 0.95,
+      },
+    })
+  }
+
+  if (!map.getLayer(AI_CHAT_RESULT_POINT_LAYER_ID)) {
+    map.addLayer({
+      id: AI_CHAT_RESULT_POINT_LAYER_ID,
+      type: "circle",
+      source: AI_CHAT_RESULT_SOURCE_ID,
+      filter: ["in", ["geometry-type"], ["literal", ["Point", "MultiPoint"]]],
+      paint: {
+        "circle-color": "#EA580C",
+        "circle-radius": 5,
+        "circle-stroke-color": "#7C2D12",
+        "circle-stroke-width": 1.5,
+      },
+    })
+  }
+}
+
+type ChatToolGeometryExtraction = {
+  overlayName: string
+  features: GeoJsonFeatureCollection["features"]
+}
+
+function getOverlayNameFromToolResult(toolName: string, result: Record<string, unknown>): string {
+  if (toolName === "get_sites" && Array.isArray(result.items)) {
+    const first = result.items[0]
+    if (first && typeof first === "object") {
+      const firstRow = first as Record<string, unknown>
+      const firstName = firstRow.name
+      if (typeof firstName === "string" && firstName.trim().length > 0) {
+        return `Site: ${firstName}`
+      }
+    }
+    return `Sites (${result.items.length})`
+  }
+
+  if (toolName === "get_assessments" && Array.isArray(result.items)) {
+    const first = result.items[0]
+    if (first && typeof first === "object") {
+      const firstRow = first as Record<string, unknown>
+      const firstId = firstRow.id
+      if (typeof firstId === "string" && firstId.trim().length > 0) {
+        return `Assessment: ${firstId}`
+      }
+    }
+    return `Assessments (${result.items.length})`
+  }
+
+  if (toolName === "get_flood_zone") {
+    const floodZoneData = result.flood_zone_data
+    if (floodZoneData && typeof floodZoneData === "object") {
+      const flood = floodZoneData as Record<string, unknown>
+      const waterwayName = flood.waterway_name
+      if (typeof waterwayName === "string" && waterwayName.trim().length > 0) {
+        return `Flood zone: ${waterwayName}`
+      }
+    }
+    return "Flood zone"
+  }
+
+  if (toolName === "get_building_info") {
+    const buildingData = result.building_data
+    if (buildingData && typeof buildingData === "object") {
+      const building = buildingData as Record<string, unknown>
+      const osmId = building.osm_id
+      if (typeof osmId === "number" || typeof osmId === "string") {
+        return `Building: ${String(osmId)}`
+      }
+    }
+    return "Building geometry"
+  }
+
+  if (toolName === "get_location_info") {
+    const province = result.province
+    const district = result.district
+    if (typeof province === "string" && province.trim().length > 0) {
+      if (typeof district === "string" && district.trim().length > 0) {
+        return `Location: ${district}, ${province}`
+      }
+      return `Location: ${province}`
+    }
+    return "Location context"
+  }
+
+  if (toolName === "get_nearest_shelter") {
+    const routeName = result.route_name
+    if (typeof routeName === "string" && routeName.trim().length > 0) {
+      return routeName
+    }
+    const shelterName = result.name
+    if (typeof shelterName === "string" && shelterName.trim().length > 0) {
+      return `Route to shelter: ${shelterName}`
+    }
+    return "Route to nearest shelter"
+  }
+
+  return toolName.replaceAll("_", " ")
+}
+
+function extractFeaturesFromChatToolResult(
+  toolName: string,
+  result: Record<string, unknown>
+): ChatToolGeometryExtraction {
+  const overlayName = getOverlayNameFromToolResult(toolName, result)
+  const features: GeoJsonFeatureCollection["features"] = []
+  const pushFeature = (
+    geometryCandidate: unknown,
+    properties: Record<string, unknown>,
+    idSuffix: string
+  ) => {
+    if (!isGeometryCandidate(geometryCandidate)) return
+    features.push({
+      type: "Feature",
+      id: `${toolName}-${idSuffix}`,
+      geometry: geometryCandidate as never,
+      properties: { tool_name: toolName, ...properties },
+    })
+  }
+
+  if (toolName === "get_sites" && Array.isArray(result.items)) {
+    result.items.forEach((item, index) => {
+      if (!item || typeof item !== "object") return
+      const row = item as Record<string, unknown>
+      pushFeature(row.boundary_geojson, { label: row.name ?? "Site boundary", source: "get_sites" }, `site-${index}`)
+    })
+    return { overlayName, features }
+  }
+
+  if (toolName === "get_assessments" && Array.isArray(result.items)) {
+    result.items.forEach((item, index) => {
+      if (!item || typeof item !== "object") return
+      const row = item as Record<string, unknown>
+      pushFeature(row.geom_geojson, { label: row.id ?? "Assessment", source: "get_assessments" }, `assessment-${index}`)
+    })
+    return { overlayName, features }
+  }
+
+  if (toolName === "get_flood_zone") {
+    const floodZoneData = result.flood_zone_data
+    if (floodZoneData && typeof floodZoneData === "object") {
+      const flood = floodZoneData as Record<string, unknown>
+      pushFeature(flood.geom_geojson, { label: flood.waterway_name ?? "Flood zone", source: "get_flood_zone" }, "flood-zone")
+    }
+    return { overlayName, features }
+  }
+
+  if (toolName === "get_building_info") {
+    const buildingData = result.building_data
+    if (buildingData && typeof buildingData === "object") {
+      const building = buildingData as Record<string, unknown>
+      pushFeature(building.geom_geojson, { label: building.osm_id ?? "Building", source: "get_building_info" }, "building")
+    }
+    return { overlayName, features }
+  }
+
+  if (toolName === "get_location_info") {
+    const provinceData = result.province_data
+    const districtData = result.district_data
+    const nearestPointData = result.nearest_point_data
+    if (provinceData && typeof provinceData === "object") {
+      const province = provinceData as Record<string, unknown>
+      pushFeature(province.geom_geojson, { label: province.name_en ?? province.name_tr ?? "Province", source: "get_location_info" }, "province")
+    }
+    if (districtData && typeof districtData === "object") {
+      const district = districtData as Record<string, unknown>
+      pushFeature(district.geom_geojson, { label: district.district ?? "District", source: "get_location_info" }, "district")
+    }
+    if (nearestPointData && typeof nearestPointData === "object") {
+      const point = nearestPointData as Record<string, unknown>
+      pushFeature(point.geom_geojson, { label: point.name ?? "Nearest point", source: "get_location_info" }, "nearest-point")
+    }
+    return { overlayName, features }
+  }
+
+  if (toolName === "get_nearest_shelter") {
+    pushFeature(
+      result.route_geometry_geojson,
+      { label: "Route to shelter", source: "get_nearest_shelter" },
+      "shelter-route"
+    )
+    return { overlayName, features }
+  }
+
+  return { overlayName, features }
+}
+
 // This component renders the PMTiles basemap with a single-button AI chat sidebar.
 export function FieldMapView() {
+  type ChatGeometryOverlay = {
+    id: string
+    name: string
+    geojson: GeoJsonFeatureCollection
+  }
+
   // This variable references the map container element for MapLibre mount.
   const mapContainerRef = useRef<HTMLDivElement | null>(null)
   const mapInstanceRef = useRef<maplibregl.Map | null>(null)
   const overlayLoadedRef = useRef<Set<GisLayerKey>>(new Set())
   // This variable caches loaded overlay GeoJSON so feature lookup can power custom map actions.
   const overlayGeoJsonRef = useRef<Partial<Record<GisLayerKey, GeoJsonFeatureCollection>>>({})
+  // This variable stores one dynamic map layer driven by AI chat tool-result geometry.
+  const aiChatResultGeoJsonRef = useRef<GeoJsonFeatureCollection>(createEmptyFeatureCollection())
+  const chatGeometryOverlaysRef = useRef<ChatGeometryOverlay[]>([])
+  const [chatGeometryOverlays, setChatGeometryOverlays] = useState<Array<{ id: string; name: string }>>([])
   // This variable stores a map-bound helper used to focus one assessment and open its popup.
   const showAssessmentOnMapRef = useRef<((assessmentId: string, lat: number, lon: number) => void) | null>(null)
 
@@ -429,7 +675,9 @@ export function FieldMapView() {
 
   // This variable tracks currently selected feature for highlighting.
   const selectedFeatureRef = useRef<{ source: string; id: string | number } | null>(null)
-  const popupRef = useRef<maplibregl.Popup | null>(null)
+
+  // This variable stores the feature info shown in the right-hand details sidebar.
+  const [selectedFeatureInfo, setSelectedFeatureInfo] = useState<SelectedFeatureInfo | null>(null)
 
   // ── Draw polygon for batch analysis ──────────────────────────────────────
   const [drawMode, setDrawMode] = useState(false)
@@ -1413,13 +1661,23 @@ export function FieldMapView() {
     }
   }, [useNewSite, newSiteNameInput, selectedExistingSite, batchUploadId, batchWorkerName])
 
-  // This function handles the Analyse button click from a building popup — shows site picker first.
-  const handleAnalyseBuilding = useCallback(async (osmId: number, lat: number, lon: number) => {
-    // Close popup and clear the map selection so no page refresh is needed.
-    if (popupRef.current) {
-      popupRef.current.remove()
-      popupRef.current = null
+  // This function closes the feature info sidebar and clears the map highlight.
+  const handleCloseFeatureInfoSidebar = useCallback(() => {
+    setSelectedFeatureInfo(null)
+    const map = mapInstanceRef.current
+    if (map && selectedFeatureRef.current) {
+      map.setFeatureState(
+        { source: selectedFeatureRef.current.source, id: selectedFeatureRef.current.id },
+        { selected: false }
+      )
+      selectedFeatureRef.current = null
     }
+  }, [])
+
+  // This function handles the Analyse button click from the feature info sidebar.
+  const handleAnalyseBuilding = useCallback(async (osmId: number, lat: number, lon: number) => {
+    // Close the info sidebar and clear the map selection so no page refresh is needed.
+    setSelectedFeatureInfo(null)
     const map = mapInstanceRef.current
     if (map && selectedFeatureRef.current) {
       map.setFeatureState(
@@ -1628,6 +1886,99 @@ export function FieldMapView() {
       toast.error(message)
     }
   }, [])
+
+  const syncAiChatGeometrySource = useCallback(() => {
+    const map = mapInstanceRef.current
+    if (!map || !map.isStyleLoaded()) {
+      return
+    }
+    ensureAiChatResultLayers(map)
+
+    const mergedFeatures = chatGeometryOverlaysRef.current.flatMap((overlay) =>
+      (overlay.geojson.features ?? []).map((feature, index) => ({
+        ...feature,
+        id: feature.id ?? `${overlay.id}-feature-${index}`,
+        properties: {
+          ...(feature.properties ?? {}),
+          overlay_id: overlay.id,
+          overlay_name: overlay.name,
+        },
+      }))
+    )
+    const mergedGeoJson = {
+      type: "FeatureCollection",
+      features: mergedFeatures,
+    } as GeoJsonFeatureCollection
+    aiChatResultGeoJsonRef.current = mergedGeoJson
+
+    const source = map.getSource(AI_CHAT_RESULT_SOURCE_ID) as maplibregl.GeoJSONSource | undefined
+    if (source) {
+      source.setData(mergedGeoJson as never)
+    }
+  }, [])
+
+  const handleRemoveChatGeometryOverlay = useCallback((overlayId: string) => {
+    chatGeometryOverlaysRef.current = chatGeometryOverlaysRef.current.filter((overlay) => overlay.id !== overlayId)
+    setChatGeometryOverlays(
+      chatGeometryOverlaysRef.current.map((overlay) => ({
+        id: overlay.id,
+        name: overlay.name,
+      }))
+    )
+    syncAiChatGeometrySource()
+  }, [syncAiChatGeometrySource])
+
+  const handleClearChatGeometryOverlays = useCallback(() => {
+    chatGeometryOverlaysRef.current = []
+    setChatGeometryOverlays([])
+    syncAiChatGeometrySource()
+  }, [syncAiChatGeometrySource])
+
+  // This function renders geometry returned by AI tool results onto dedicated map overlays.
+  const handleChatToolResult = useCallback((toolName: string, result: Record<string, unknown>) => {
+    const extraction = extractFeaturesFromChatToolResult(toolName, result)
+    const features = extraction.features
+    if (features.length === 0) {
+      return
+    }
+
+    const nextGeoJson = {
+      type: "FeatureCollection",
+      features,
+    } as GeoJsonFeatureCollection
+    const overlayId = `${toolName}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    chatGeometryOverlaysRef.current = [
+      ...chatGeometryOverlaysRef.current,
+      {
+        id: overlayId,
+        name: extraction.overlayName,
+        geojson: nextGeoJson,
+      },
+    ]
+    setChatGeometryOverlays(
+      chatGeometryOverlaysRef.current.map((overlay) => ({
+        id: overlay.id,
+        name: overlay.name,
+      }))
+    )
+    syncAiChatGeometrySource()
+
+    const map = mapInstanceRef.current
+    if (!map || !map.isStyleLoaded()) {
+      return
+    }
+
+    const allPairs = features.flatMap((feature) =>
+      collectLngLatPairsFromGeoJsonGeometry(feature.geometry as { type: string; coordinates: unknown })
+    )
+    if (allPairs.length > 0) {
+      const bounds = new maplibregl.LngLatBounds(allPairs[0], allPairs[0])
+      for (const [lng, lat] of allPairs.slice(1)) {
+        bounds.extend([lng, lat])
+      }
+      map.fitBounds(bounds, { padding: 70, duration: 900, maxZoom: 16 })
+    }
+  }, [syncAiChatGeometrySource])
 
   // Keep pending site batches in sync for right-side cards.
   useEffect(() => {
@@ -2040,6 +2391,7 @@ export function FieldMapView() {
 
       // Fly to requested province coordinates
       map.on("load", () => {
+        syncAiChatGeometrySource()
         setTimeout(() => {
           map.flyTo({
             center: [38.268983, 37.763058],
@@ -2049,155 +2401,6 @@ export function FieldMapView() {
           })
         }, 500)
       })
-
-      // This function creates HTML for popup card from feature properties.
-      const createPopupContent = (
-        properties: Record<string, unknown>,
-        layerKey: GisLayerKey,
-        layerLabel: string,
-        latitude: string,
-        longitude: string
-      ): string => {
-        if (layerKey === "assessments") {
-          // This variable stores selected assessment severity for popup highlighting.
-          const severity = String(properties.severity ?? "-")
-          // This variable stores selected assessment status text.
-          const status = String(properties.status ?? "unknown")
-          // This variable stores selected assessment damage type text.
-          const damageType = String(properties.damage_type ?? "unknown").replaceAll("_", " ")
-          // This variable stores selected assessment structural risk text.
-          const structuralRisk = String(properties.structural_risk ?? "unknown")
-          // This variable stores selected assessment action guidance text.
-          const recommendation = String(properties.recommended_action ?? "not available").replaceAll("_", " ")
-          // This variable stores selected assessment source/input type text.
-          const inputType = String(properties.input_type ?? "unknown").replaceAll("_", " ")
-          // This variable stores selected assessment timestamp text.
-          const createdAt = String(properties.created_at ?? "").replace("T", " ").replace("Z", "")
-          // This variable stores selected assessment id text.
-          const assessmentId = String(properties.id ?? "-")
-          const postChipPath = String(properties.chip_path ?? properties.photo_path ?? "").trim()
-          const preChipPath = String(properties.pre_chip_path ?? "").trim()
-          const mediaLinks = `
-            <div class="rounded-md border border-[#D3D1C7] bg-[#FAFAF8] px-2.5 py-2">
-              <div class="text-[10px] uppercase tracking-wide text-[#6b7280]">Orthophoto Images</div>
-              <div class="mt-1 flex items-center gap-3">
-                ${
-                  postChipPath
-                    ? `<a href="http://localhost:8000/media/${postChipPath}" target="_blank" rel="noopener noreferrer" class="text-[11px] font-semibold text-[#0F6E56] underline">post ↗</a>`
-                    : `<span class="text-[11px] text-[#9ca3af]">post -</span>`
-                }
-                ${
-                  preChipPath
-                    ? `<a href="http://localhost:8000/media/${preChipPath}" target="_blank" rel="noopener noreferrer" class="text-[11px] font-semibold text-[#2563eb] underline">pre ↗</a>`
-                    : `<span class="text-[11px] text-[#9ca3af]">pre -</span>`
-                }
-              </div>
-            </div>
-          `
-
-          return `
-            <div class="min-w-[260px] max-w-[360px] overflow-hidden rounded-lg border border-[#D3D1C7] bg-white">
-              <div class="flex items-center justify-between bg-[#0F6E56] px-3 py-2">
-                <h3 class="text-sm font-bold text-white">${layerLabel}</h3>
-                <span class="rounded bg-white/20 px-2 py-0.5 text-[10px] font-semibold uppercase text-white">Severity ${severity}</span>
-              </div>
-              <div class="space-y-2 px-3 py-3 text-xs text-[#17352b]">
-                <div class="rounded-md border border-[#D3D1C7] bg-[#FAFAF8] px-2.5 py-2">
-                  <div class="text-[10px] uppercase tracking-wide text-[#6b7280]">Assessment ID</div>
-                  <div class="mt-0.5 font-semibold">${assessmentId}</div>
-                </div>
-                <div class="grid grid-cols-2 gap-2">
-                  <div class="rounded-md border border-[#D3D1C7] px-2.5 py-2"><div class="text-[10px] uppercase text-[#6b7280]">Damage</div><div class="mt-0.5 font-semibold capitalize">${damageType}</div></div>
-                  <div class="rounded-md border border-[#D3D1C7] px-2.5 py-2"><div class="text-[10px] uppercase text-[#6b7280]">Risk</div><div class="mt-0.5 font-semibold capitalize">${structuralRisk}</div></div>
-                </div>
-                <div class="grid grid-cols-2 gap-2">
-                  <div class="rounded-md border border-[#D3D1C7] px-2.5 py-2"><div class="text-[10px] uppercase text-[#6b7280]">Status</div><div class="mt-0.5 font-semibold capitalize">${status}</div></div>
-                  <div class="rounded-md border border-[#D3D1C7] px-2.5 py-2"><div class="text-[10px] uppercase text-[#6b7280]">Input</div><div class="mt-0.5 font-semibold capitalize">${inputType}</div></div>
-                </div>
-                <div class="rounded-md border border-[#D3D1C7] px-2.5 py-2">
-                  <div class="text-[10px] uppercase text-[#6b7280]">Recommended Action</div>
-                  <div class="mt-0.5 font-semibold capitalize">${recommendation}</div>
-                </div>
-                ${mediaLinks}
-                <div class="flex items-center justify-between rounded-md border border-[#D3D1C7] bg-[#FAFAF8] px-2.5 py-2">
-                  <div>
-                    <div class="text-[10px] uppercase tracking-wide text-[#6b7280]">Location</div>
-                    <div class="font-semibold">${latitude}, ${longitude}</div>
-                  </div>
-                  <button
-                    type="button"
-                    data-copy-location="${latitude}, ${longitude}"
-                    class="rounded-md border border-[#D3D1C7] bg-white px-2 py-1 text-[10px] font-semibold text-[#0F6E56] hover:bg-[#ECEAE2]"
-                  >
-                    Copy
-                  </button>
-                </div>
-                <div class="text-[10px] text-[#6b7280]">Created: ${createdAt || "-"}</div>
-              </div>
-            </div>
-          `
-        }
-
-        const entries = Object.entries(properties).filter(
-          ([key, value]) => value !== null && value !== undefined && value !== "" && key !== "id"
-        )
-
-        const rows = entries
-          .map(
-            ([key, value]) => `
-            <div class="flex justify-between gap-4 py-1.5 border-b border-gray-100 last:border-0">
-              <span class="text-xs font-medium text-gray-600 capitalize">${key.replace(/_/g, " ")}</span>
-              <span class="text-xs text-gray-900 font-semibold">${String(value)}</span>
-            </div>
-          `
-          )
-          .join("")
-
-        const detailsSection =
-          rows.length > 0
-            ? rows
-            : `<div class="py-2 text-xs text-gray-500">No additional data available.</div>`
-
-        // Show Analyse button for turkey_buildings layer.
-        const osmId = properties.osm_id ?? properties.id ?? ""
-        const analyseButton =
-          layerKey === "turkey_buildings"
-            ? `<button
-                type="button"
-                data-analyse-building="${osmId}"
-                data-lat="${latitude}"
-                data-lon="${longitude}"
-                class="mt-2 w-full rounded-md border border-[#0F6E56] bg-[#0F6E56] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#0C614D]"
-              >
-                Analyse Building
-              </button>`
-            : ""
-
-        return `
-          <div class="min-w-[250px] max-w-[350px]">
-            <div class="bg-[#0F6E56] px-3 py-2 rounded-t-lg">
-              <h3 class="text-sm font-bold text-white">${layerLabel}</h3>
-            </div>
-            <div class="bg-white px-3 py-2 max-h-[300px] overflow-y-auto">
-              <div class="flex items-center justify-between gap-2 py-2 border-b border-gray-200">
-                <div class="flex flex-col">
-                  <span class="text-[10px] font-medium uppercase tracking-wide text-gray-500">Location</span>
-                  <span class="text-xs font-semibold text-gray-900">${latitude}, ${longitude}</span>
-                </div>
-                <button
-                  type="button"
-                  data-copy-location="${latitude}, ${longitude}"
-                  class="rounded-md border border-[#D3D1C7] bg-[#F7F6F2] px-2 py-1 text-[10px] font-semibold text-[#0F6E56] hover:bg-[#ECEAE2]"
-                >
-                  Copy
-                </button>
-              </div>
-              ${detailsSection}
-              ${analyseButton}
-            </div>
-          </div>
-        `
-      }
 
       // This function focuses one assessment by ID and opens the same popup template used by map clicks.
       const showAssessmentOnMap = (assessmentId: string, fallbackLat: number, fallbackLon: number) => {
@@ -2214,12 +2417,8 @@ export function FieldMapView() {
         }
 
         const properties = (matchedFeature.properties ?? {}) as Record<string, unknown>
-        const popupLat = Number(properties.lat ?? fallbackLat)
-        const popupLon = Number(properties.lon ?? fallbackLon)
-        const latitude = popupLat.toFixed(6)
-        const longitude = popupLon.toFixed(6)
-        const locationText = `${latitude}, ${longitude}`
-        const popupContent = createPopupContent(properties, "assessments", "Assessments", latitude, longitude)
+        const focusLat = Number(properties.lat ?? fallbackLat)
+        const focusLon = Number(properties.lon ?? fallbackLon)
 
         if (selectedFeatureRef.current && mapInstanceRef.current) {
           mapInstanceRef.current.setFeatureState(
@@ -2238,54 +2437,18 @@ export function FieldMapView() {
         }
 
         map.flyTo({
-          center: [popupLon, popupLat],
+          center: [focusLon, focusLat],
           zoom: Math.max(map.getZoom(), 17),
           essential: true,
         })
 
-        if (popupRef.current) {
-          popupRef.current.remove()
-        }
-
-        const popup = new maplibregl.Popup({
-          closeButton: true,
-          closeOnClick: false,
-          maxWidth: "400px",
-          className: "custom-popup",
+        setSelectedFeatureInfo({
+          properties,
+          layerKey: "assessments",
+          layerLabel: "Assessments",
+          lat: focusLat,
+          lon: focusLon,
         })
-          .setLngLat([popupLon, popupLat])
-          .setHTML(popupContent)
-          .addTo(map)
-
-        const copyButton = popup.getElement().querySelector<HTMLButtonElement>("[data-copy-location]")
-        if (copyButton) {
-          copyButton.addEventListener("click", async (event) => {
-            event.preventDefault()
-            event.stopPropagation()
-            try {
-              await navigator.clipboard.writeText(locationText)
-              copyButton.textContent = "Copied"
-            } catch {
-              copyButton.textContent = "Error"
-            }
-
-            window.setTimeout(() => {
-              copyButton.textContent = "Copy"
-            }, 1200)
-          })
-        }
-
-        popup.on("close", () => {
-          if (selectedFeatureRef.current && mapInstanceRef.current) {
-            mapInstanceRef.current.setFeatureState(
-              { source: selectedFeatureRef.current.source, id: selectedFeatureRef.current.id },
-              { selected: false }
-            )
-            selectedFeatureRef.current = null
-          }
-        })
-
-        popupRef.current = popup
       }
 
       showAssessmentOnMapRef.current = showAssessmentOnMap
@@ -2317,68 +2480,21 @@ export function FieldMapView() {
         const config = overlayLayerConfigs.find((c) => c.key === layerKey)
         const layerLabel = config?.label || "Feature"
 
-        // Create and show popup
-        const latitude = e.lngLat.lat.toFixed(6)
-        const longitude = e.lngLat.lng.toFixed(6)
-        const locationText = `${latitude}, ${longitude}`
-        const popupContent = createPopupContent(feature.properties || {}, layerKey, layerLabel, latitude, longitude)
+        // Open the right-hand info sidebar instead of a popup.
+        const properties = (feature.properties ?? {}) as Record<string, unknown>
+        // Prefer the feature's own coordinates when present so the sidebar pins the actual feature, not the click point.
+        const latNumber = Number(properties.lat)
+        const lonNumber = Number(properties.lon)
+        const focusLat = Number.isFinite(latNumber) ? latNumber : e.lngLat.lat
+        const focusLon = Number.isFinite(lonNumber) ? lonNumber : e.lngLat.lng
 
-        // Remove existing popup
-        if (popupRef.current) {
-          popupRef.current.remove()
-        }
-
-        const popup = new maplibregl.Popup({
-          closeButton: true,
-          closeOnClick: false,
-          maxWidth: "400px",
-          className: "custom-popup",
+        setSelectedFeatureInfo({
+          properties,
+          layerKey,
+          layerLabel,
+          lat: focusLat,
+          lon: focusLon,
         })
-          .setLngLat(e.lngLat)
-          .setHTML(popupContent)
-          .addTo(map)
-
-        const copyButton = popup.getElement().querySelector<HTMLButtonElement>("[data-copy-location]")
-        if (copyButton) {
-          copyButton.addEventListener("click", async (event) => {
-            event.preventDefault()
-            event.stopPropagation()
-            try {
-              await navigator.clipboard.writeText(locationText)
-              copyButton.textContent = "Copied"
-            } catch {
-              copyButton.textContent = "Error"
-            }
-
-            window.setTimeout(() => {
-              copyButton.textContent = "Copy"
-            }, 1200)
-          })
-        }
-
-        const analyseBtn = popup.getElement().querySelector<HTMLButtonElement>("[data-analyse-building]")
-        if (analyseBtn) {
-          analyseBtn.addEventListener("click", (event) => {
-            event.preventDefault()
-            event.stopPropagation()
-            const osmId = Number(analyseBtn.dataset.analyseBuilding)
-            const lat = parseFloat(analyseBtn.dataset.lat ?? "0")
-            const lon = parseFloat(analyseBtn.dataset.lon ?? "0")
-            void handleAnalyseBuilding(osmId, lat, lon)
-          })
-        }
-
-        popup.on("close", () => {
-          if (selectedFeatureRef.current && mapInstanceRef.current) {
-            mapInstanceRef.current.setFeatureState(
-              { source: selectedFeatureRef.current.source, id: selectedFeatureRef.current.id },
-              { selected: false }
-            )
-            selectedFeatureRef.current = null
-          }
-        })
-
-        popupRef.current = popup
       }
 
       for (const config of overlayLayerConfigs) {
@@ -2623,6 +2739,7 @@ export function FieldMapView() {
       isUnmounted = true
       mapInstanceRef.current = null
       overlayLoadedRef.current.clear()
+      chatGeometryOverlaysRef.current = []
       showAssessmentOnMapRef.current = null
       if (mapInstance) {
         mapInstance.remove()
@@ -2632,21 +2749,6 @@ export function FieldMapView() {
 
   return (
     <div className="relative flex h-full w-full flex-col overflow-hidden">
-      <style jsx global>{`
-        .custom-popup .maplibregl-popup-close-button {
-          width: 32px !important;
-          height: 32px !important;
-          font-size: 24px !important;
-          line-height: 32px !important;
-          padding: 0 !important;
-          border-radius: 4px;
-          right: 4px;
-          top: 4px;
-        }
-        .custom-popup .maplibregl-popup-close-button:hover {
-          background-color: rgba(0, 0, 0, 0.1);
-        }
-      `}</style>
       <div ref={mapContainerRef} className="h-full w-full" />
 
       <MapDrawControls
@@ -2663,6 +2765,40 @@ export function FieldMapView() {
         onShowInMap={handleShowPendingBatchInMap}
         onAnalyze={(batch) => void handleAnalyzePendingBatch(batch)}
       />
+
+      {chatGeometryOverlays.length > 0 && (
+        <div className="absolute left-4 top-16 z-30 w-72 rounded-lg border border-[#D3D1C7] bg-white shadow-xl">
+          <div className="flex items-center justify-between rounded-t-lg bg-[#9A3412] px-3 py-2">
+            <span className="text-sm font-bold text-white">AI Geometry Overlays</span>
+            <button
+              type="button"
+              onClick={handleClearChatGeometryOverlays}
+              className="rounded border border-white/35 bg-white/10 px-2 py-0.5 text-[10px] font-semibold text-white hover:bg-white/20"
+            >
+              Clear all
+            </button>
+          </div>
+          <div className="max-h-44 space-y-1 overflow-y-auto px-2 py-2">
+            {chatGeometryOverlays.map((overlay) => (
+              <div
+                key={overlay.id}
+                className="flex items-center justify-between gap-2 rounded border border-[#E6E3D8] bg-[#FAFAF8] px-2 py-1.5"
+              >
+                <span className="truncate text-xs font-medium text-[#17352b]">{overlay.name}</span>
+                <button
+                  type="button"
+                  onClick={() => handleRemoveChatGeometryOverlay(overlay.id)}
+                  className="rounded border border-[#D3D1C7] bg-white px-1.5 py-0.5 text-[10px] font-semibold text-[#9A3412] hover:bg-[#F3F1E9]"
+                  title="Remove overlay"
+                  aria-label={`Remove ${overlay.name}`}
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Batch progress panel */}
       {activeBatchId && batchProgress && (
@@ -3000,12 +3136,12 @@ export function FieldMapView() {
               </div>
 
               <div>
-                <label className="mb-1 block text-xs font-semibold text-[#17352b]">Worker Name</label>
+                <label className="mb-1 block text-xs font-semibold text-[#17352b]">Team Name (optional)</label>
                 <input
                   type="text"
                   value={batchWorkerName}
                   onChange={(e) => setBatchWorkerName(e.target.value)}
-                  placeholder="Optional"
+                  placeholder="e.g. Team Alpha"
                   className="w-full rounded-md border border-[#D3D1C7] px-3 py-2 text-sm text-[#17352b] focus:outline-none focus:ring-2 focus:ring-[#0F6E56]"
                 />
               </div>
@@ -3190,7 +3326,17 @@ export function FieldMapView() {
         </div>
       </aside>
 
-      <FieldMapChatSidebar isOpen={isChatSidebarOpen} onOpenChange={setIsChatSidebarOpen} />
+      <FieldMapChatSidebar
+        isOpen={isChatSidebarOpen}
+        onOpenChange={setIsChatSidebarOpen}
+        onToolResult={handleChatToolResult}
+      />
+
+      <FeatureInfoSidebar
+        info={selectedFeatureInfo}
+        onClose={handleCloseFeatureInfoSidebar}
+        onAnalyseBuilding={handleAnalyseBuilding}
+      />
     </div>
   )
 }

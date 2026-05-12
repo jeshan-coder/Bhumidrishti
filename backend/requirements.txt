@@ -8,3 +8,5 @@ python-multipart
 ollama
 httpx
 opencv-python-headless
+fpdf2
+staticmap

@@ -32,6 +32,7 @@ type StreamCallbacks = {
   onThinking: (text: string) => void
   onToken: (token: string) => void
   onToolCall?: (toolName: string, args: Record<string, unknown>) => void
+  onToolResult?: (toolName: string, result: Record<string, unknown>) => void
   onDone: () => void
 }
 
@@ -170,6 +171,20 @@ export async function streamChatRequest(
 
         if (typeof name === "string" && callbacks.onToolCall) {
           callbacks.onToolCall(name, args)
+        }
+        continue
+      }
+
+      if (parsed.event === "tool_result" && typeof parsed.data === "object" && parsed.data !== null) {
+        const name = (parsed.data as { name?: unknown }).name
+        const rawResult = (parsed.data as { result?: unknown }).result
+        const result =
+          typeof rawResult === "object" && rawResult !== null
+            ? (rawResult as Record<string, unknown>)
+            : {}
+
+        if (typeof name === "string" && callbacks.onToolResult) {
+          callbacks.onToolResult(name, result)
         }
         continue
       }

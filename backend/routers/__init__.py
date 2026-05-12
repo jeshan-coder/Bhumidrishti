@@ -9,6 +9,7 @@ from .upload import router as upload_router
 from .satellite import router as satellite_router
 from .batch import router as batch_router
 from .dispatch import router as dispatch_router
+from .report import router as report_router
 
 __all__ = [
     "health_router",
@@ -20,4 +21,5 @@ __all__ = [
     "satellite_router",
     "batch_router",
     "dispatch_router",
+    "report_router",
 ]
