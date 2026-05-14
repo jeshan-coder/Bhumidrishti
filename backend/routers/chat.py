@@ -14,6 +14,7 @@ from models.chat import ChatRequest, ChatResponseData
 from prompts.base_system_prompt import build_bhumidrishti_system_prompt
 from services.ai_runtime import ACTIVE_GEMMA_MODEL
 from services.gemma_pipeline import CHAT_TOOLS, dispatch_tool
+from services.tools import resolve_tool_name
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -225,6 +226,13 @@ async def chat_with_gemma_stream(payload: ChatRequest) -> StreamingResponse:
                                     tool_args = {}
 
                             if isinstance(tool_name, str) and tool_name:
+                                canonical_name = resolve_tool_name(tool_name)
+                                if canonical_name != tool_name:
+                                    logger.warning(
+                                        "chat.stream.tool_call.alias_resolved iteration=%s hallucinated=%s canonical=%s",
+                                        iteration, tool_name, canonical_name,
+                                    )
+                                tool_name = canonical_name
                                 logger.info(
                                     "chat.stream.tool_call.detected iteration=%s tool=%s args=%s",
                                     iteration,

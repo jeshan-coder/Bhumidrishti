@@ -536,6 +536,11 @@ _TOOL_ALIASES: dict[str, str] = {
 }
 
 
+def resolve_tool_name(name: str) -> str:
+    """Return canonical tool name, resolving any known hallucinated aliases."""
+    return _TOOL_ALIASES.get(name, name)
+
+
 def _normalise_tool_args(tool_name: str, tool_args: dict[_Any, _Any]) -> dict[str, _Any]:
     """Return a normalised copy of tool_args, fixing common model mistakes."""
     args = dict(tool_args)
