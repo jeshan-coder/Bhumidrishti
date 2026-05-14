@@ -140,6 +140,7 @@ async def get_assessments(
     batch_columns = await _get_table_columns(db, "batches")
     can_join_sites = bool(site_columns) and "site_id" in assessment_columns and "id" in site_columns
     can_join_batches = bool(batch_columns) and "batch_id" in assessment_columns and "id" in batch_columns
+    can_join_buildings = "osm_building_id" in assessment_columns
 
     requested_limit = 1 if _as_bool(tool_args.get("single")) else _as_int(tool_args.get("limit"))
     if tool_args.get("assessment_id") or tool_args.get("id"):
@@ -219,12 +220,17 @@ async def get_assessments(
     else:
         site_expr = "NULL::text"
 
+    # Prefer building polygon footprint over assessment point when available.
+    # tb.geom comes from turkey_buildings JOIN on osm_building_id (may be NULL).
+    _tb = "tb.geom" if can_join_buildings else None
     if "geom" in assessment_columns and {"lat", "lon"}.issubset(assessment_columns):
-        assessment_geom_expr = "COALESCE(a.geom, ST_SetSRID(ST_Point(a.lon, a.lat), 4326))"
+        _parts = ([_tb] if _tb else []) + ["a.geom", "ST_SetSRID(ST_Point(a.lon, a.lat), 4326)"]
+        assessment_geom_expr = f"COALESCE({', '.join(_parts)})"
     elif "geom" in assessment_columns:
-        assessment_geom_expr = "a.geom"
+        _parts = ([_tb] if _tb else []) + ["a.geom"]
+        assessment_geom_expr = f"COALESCE({', '.join(_parts)})"
     else:
-        assessment_geom_expr = ""
+        assessment_geom_expr = _tb or ""
 
     site_name = _as_text(tool_args.get("site_name"))
     if site_name:
@@ -384,6 +390,8 @@ async def get_assessments(
     geom_select = f"ST_AsGeoJSON({assessment_geom_expr})::text AS geom_geojson" if include_geometry and assessment_geom_expr else "NULL::text AS geom_geojson"
 
     joins: list[str] = []
+    if can_join_buildings:
+        joins.append("LEFT JOIN turkey_buildings tb ON a.osm_building_id = tb.osm_id")
     if can_join_sites:
         joins.append("LEFT JOIN sites s ON a.site_id = s.id")
     if can_join_batches:
