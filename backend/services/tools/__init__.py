@@ -44,18 +44,28 @@ ASSESSMENT_TOOLS: list[dict] = [
             "name": "get_building_info",
             "description": (
                 "Get building information from the local PostGIS database "
-                "for the building at the given GPS coordinates. "
+                "for a building by GPS coordinates, OSM ID, or GeoJSON geometry. "
                 "Returns building type, number of floors, construction material, "
                 "and OSM building ID if a matching footprint exists. "
-                "Call this first before any other spatial tool."
+                "Use osm_id when the user mentions a specific OSM building. "
+                "Use geometry when a selected map feature provides a polygon. "
+                "Use lat/lon when only a point location is available. "
+                "Call this first before any other spatial tool during assessment."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "lat": {"type": "number", "description": "Latitude in decimal degrees WGS84"},
                     "lon": {"type": "number", "description": "Longitude in decimal degrees WGS84"},
+                    "osm_id": {
+                        "type": "integer",
+                        "description": "Optional turkey_buildings.osm_id for exact building lookup",
+                    },
+                    "geometry": {
+                        "type": "object",
+                        "description": "Optional GeoJSON Polygon or MultiPolygon geometry for spatial building lookup",
+                    },
                 },
-                "required": ["lat", "lon"],
             },
         },
     },
@@ -179,20 +189,48 @@ COORDINATION_TOOLS: list[dict] = [
         "function": {
             "name": "get_assessments",
             "description": (
-                "Query assessments with optional filters for site, severity, status, "
-                "occupant status, flood risk, building, and sorting. "
-                "Returns full assessment fields for response coordination."
+                "Query one or many disaster damage assessment records with rich filters. "
+                "Use this for assessment search, triage lists, dashboard/map filtering, "
+                "spatial queries by GeoJSON or point radius, and questions about severity, "
+                "damage type, structural risk, building properties, road access, flood risk, "
+                "field worker, response team, verification, status, and timestamps. "
+                "Returns assessment rows plus geom_geojson by default so results can be displayed on the map."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "single": {
+                        "type": "boolean",
+                        "description": "True when the user asks for one specific/latest/top assessment record",
+                    },
                     "site_id": {"type": "integer", "description": "Filter by sites.id"},
-                    "site_name": {"type": "string", "description": "Partial match on site name"},
+                    "site_name": {"type": "string", "description": "Partial match on assessment/site/batch site name"},
                     "assessment_id": {"type": "string", "description": "Exact assessment id (e.g. ASS-2847)"},
+                    "assessment_ids": {
+                        "type": "array",
+                        "description": "Exact list of assessment IDs",
+                        "items": {"type": "string"},
+                    },
                     "building_id": {"type": "integer", "description": "Filter by assessments.osm_building_id"},
+                    "osm_building_id": {"type": "integer", "description": "Alias for building_id"},
                     "batch_id": {"type": "string", "description": "Filter by assessments.batch_id"},
+                    "province": {"type": "string", "description": "Partial match on province, e.g. Hatay or Adiyaman"},
+                    "district": {"type": "string", "description": "Partial match on district"},
+                    "input_type": {
+                        "type": "string",
+                        "description": "ground_photo, drone_images, orthophoto, satellite, or video",
+                    },
+                    "damage_type": {
+                        "type": "string",
+                        "description": "Partial match on damage_type such as full_collapse, partial_collapse, facade_damage, structural_crack, roof_damage, no_visible_damage",
+                    },
+                    "structural_risk": {"type": "string", "description": "high, moderate, low, or unknown"},
+                    "building_type": {"type": "string", "description": "Partial match on building_type such as residential, school, hospital, mosque, commercial"},
+                    "building_material": {"type": "string", "description": "Partial match on building_material"},
                     "severity_min": {"type": "integer", "description": "Minimum severity 1-5"},
                     "severity_max": {"type": "integer", "description": "Maximum severity 1-5"},
+                    "action_priority_min": {"type": "integer", "description": "Minimum action priority 1-5"},
+                    "action_priority_max": {"type": "integer", "description": "Maximum action priority 1-5"},
                     "status": {
                         "type": "string",
                         "description": "pending, in_review, responded, closed, false_positive",
@@ -202,10 +240,65 @@ COORDINATION_TOOLS: list[dict] = [
                         "description": "trapped, signs_of_life, potentially_trapped, evacuated, unknown",
                     },
                     "flood_zone": {"type": "boolean", "description": "Filter flood zone true/false"},
-                    "limit": {"type": "integer", "description": "Rows to return (default 10, max 200)"},
+                    "flood_return_period": {"type": "string", "description": "Partial match, e.g. 100yr, 50yr, none"},
+                    "elevation_min": {"type": "number", "description": "Minimum elevation in metres"},
+                    "elevation_max": {"type": "number", "description": "Maximum elevation in metres"},
+                    "slope_min": {"type": "number", "description": "Minimum slope in degrees"},
+                    "slope_max": {"type": "number", "description": "Maximum slope in degrees"},
+                    "slope_risk": {"type": "string", "description": "high, moderate, or low"},
+                    "road_access": {"type": "string", "description": "passable, blocked, or unknown"},
+                    "nearest_road": {"type": "string", "description": "Partial match on nearest road name"},
+                    "road_distance_min": {"type": "number", "description": "Minimum road distance in metres"},
+                    "road_distance_max": {"type": "number", "description": "Maximum road distance in metres"},
+                    "nearest_shelter": {"type": "string", "description": "Partial match on nearest shelter name"},
+                    "shelter_type": {"type": "string", "description": "school, hospital, community_centre, mosque, etc."},
+                    "shelter_distance_min": {"type": "number", "description": "Minimum shelter distance in metres"},
+                    "shelter_distance_max": {"type": "number", "description": "Maximum shelter distance in metres"},
+                    "building_area_min": {"type": "number", "description": "Minimum building footprint area in square metres"},
+                    "building_area_max": {"type": "number", "description": "Maximum building footprint area in square metres"},
+                    "building_width_min": {"type": "number", "description": "Minimum building width in metres"},
+                    "building_width_max": {"type": "number", "description": "Maximum building width in metres"},
+                    "building_height_min": {"type": "number", "description": "Minimum building height in metres"},
+                    "building_height_max": {"type": "number", "description": "Maximum building height in metres"},
+                    "confidence_min": {"type": "number", "description": "Minimum model confidence 0-1"},
+                    "confidence_max": {"type": "number", "description": "Maximum model confidence 0-1"},
+                    "worker_name": {"type": "string", "description": "Partial match on submitting field worker name"},
+                    "worker_device": {"type": "string", "description": "Partial match on field worker device"},
+                    "team_name": {"type": "string", "description": "Partial match on response_team / rescue team name"},
+                    "response_team": {"type": "string", "description": "Partial match on response_team / rescue team name"},
+                    "verified": {"type": "boolean", "description": "Filter verified_by_ground true/false"},
+                    "verified_by_ground": {"type": "boolean", "description": "Filter verified_by_ground true/false"},
+                    "created_after": {"type": "string", "description": "Created at or after this ISO timestamp/date"},
+                    "created_before": {"type": "string", "description": "Created at or before this ISO timestamp/date"},
+                    "updated_after": {"type": "string", "description": "Updated at or after this ISO timestamp/date"},
+                    "updated_before": {"type": "string", "description": "Updated at or before this ISO timestamp/date"},
+                    "responded_after": {"type": "string", "description": "Responded at or after this ISO timestamp/date"},
+                    "responded_before": {"type": "string", "description": "Responded at or before this ISO timestamp/date"},
+                    "lat": {"type": "number", "description": "Latitude for point-radius spatial assessment search"},
+                    "lon": {"type": "number", "description": "Longitude for point-radius spatial assessment search"},
+                    "within_meters": {"type": "number", "description": "Radius in metres for lat/lon spatial search"},
+                    "geometry": {
+                        "type": "object",
+                        "description": "GeoJSON geometry, Feature, or FeatureCollection for spatial assessment filtering",
+                    },
+                    "geometry_geojson": {
+                        "type": "object",
+                        "description": "Alias for geometry; GeoJSON geometry for spatial filtering",
+                    },
+                    "spatial_relation": {
+                        "type": "string",
+                        "description": "intersects (default), within, or contains for geometry spatial filtering",
+                    },
+                    "search": {"type": "string", "description": "Free-text search across IDs, location, damage, reasoning, worker, and response fields"},
+                    "warning": {"type": "string", "description": "Partial match inside warnings JSON"},
+                    "include_geometry": {
+                        "type": "boolean",
+                        "description": "Return geom_geojson for map display; default true",
+                    },
+                    "limit": {"type": "integer", "description": "Rows to return (default 20, max 500)"},
                     "order_by": {
                         "type": "string",
-                        "description": "Sort field: severity, created_at, action_priority",
+                        "description": "Sort field such as severity, created_at, updated_at, responded_at, action_priority, confidence, distance_m, elevation_m, slope_degrees, building_area_m2, building_height_m",
                     },
                     "order_dir": {
                         "type": "string",
@@ -496,7 +589,13 @@ async def dispatch_tool(
         lon = tool_args.get("lon")
         if tool_name == "get_building_info":
             from services.tools.get_building_info import get_building_info  # noqa: PLC0415
-            result = await get_building_info(lat, lon, db)
+            result = await get_building_info(
+                lat=lat,
+                lon=lon,
+                db=db,
+                osm_id=tool_args.get("osm_id"),
+                geometry=tool_args.get("geometry") or tool_args.get("geometry_geojson"),
+            )
         elif tool_name == "get_flood_zone":
             from services.tools.get_flood_zone import get_flood_zone  # noqa: PLC0415
             result = await get_flood_zone(lat, lon, db)

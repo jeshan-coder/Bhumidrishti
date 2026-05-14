@@ -213,9 +213,16 @@ damaged or destroyed between the two images.
 The green box marks the same geographic location in both images.
 Compare what was there before versus what is there now.
 
-The GREEN polygon outline marks your target building.
-ALL other buildings visible are context only.
-DO NOT assess any building other than the green-outlined one.
+The GREEN polygon outline is an approximate target cue.
+It may be slightly shifted or may cover only a fraction of the target building because
+of orthophoto distortion, georeferencing mismatch, or chip construction.
+Use surrounding context to identify the most likely complete building connected to the
+green outline, including nearby roads, neighboring buildings, shadows, debris patterns,
+and footprint continuity between the pre-earthquake and post-earthquake images.
+Assess the full visible building associated with the green outline, not only the pixels
+inside the polygon. Do not switch to a different nearby building only because it appears
+more damaged. If the target remains ambiguous, mention this in reasoning and add
+"partial_view_only" or "poor_image_quality" to warnings as appropriate.
 {dark_warning}
 INSTRUCTIONS:
 1. Call get_building_info({lat}, {lon}) first

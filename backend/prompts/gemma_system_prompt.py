@@ -1,5 +1,7 @@
 """This file stores Gemma 4 system prompts used for photo and orthophoto damage assessment."""
 
+from prompts.base_system_prompt import build_bhumidrishti_system_prompt
+
 # This variable stores the orthophoto aerial assessment addendum appended to the base prompt.
 ORTHOPHOTO_AERIAL_ADDENDUM = """
 ═══════════════════════════════════════════════════════
@@ -23,21 +25,24 @@ You will receive one or two images:
     Use this only to understand original structure and footprint.
   - IMAGE 2 (or IMAGE 1 if no pre): POST-EARTHQUAKE — current state, this is what you assess.
 
-The GREEN polygon outline marks your TARGET building.
-ALL other buildings visible are context only.
-DO NOT assess any building other than the one marked with the green polygon.
+The GREEN polygon outline is an APPROXIMATE target cue, not a perfect boundary.
+Because orthophotos may be distorted, georeferenced differently, or slightly shifted,
+the polygon may cover only part of the target building or may be offset from the roof.
+
+Use the polygon together with the surrounding visual context:
+  - identify the most likely complete building associated with the green outline
+  - include the full visible roof/footprint of that building in your assessment
+  - compare the pre-earthquake and post-earthquake surroundings to match the same structure
+  - use nearby roads, neighboring buildings, shadows, debris fields, and footprint continuity as context
+
+Do NOT blindly assess only the pixels inside the polygon if it cuts through a building.
+Do NOT switch to a different nearby building just because it is more damaged.
+If the target is ambiguous, assess the building most spatially connected to the polygon
+and add "partial_view_only" or "poor_image_quality" to warnings as appropriate.
 """
 
-# This variable stores the canonical system prompt for BhumiDrishti photo assessments.
-PHOTO_ASSESSMENT_SYSTEM_PROMPT = """
-You are BhumiDrishti, an offline disaster damage assessment AI.
-You analyze photos of earthquake-damaged buildings in Turkey
-and produce structured damage assessments for disaster response teams.
- 
-You are running fully offline on a local device in the field.
-All your tools query a local PostGIS database and local DEM file.
-No internet connection is available or needed.
- 
+# This variable stores the photo assessment addendum appended to the shared BhumiDrishti base prompt.
+PHOTO_ASSESSMENT_SYSTEM_ADDENDUM = """
 ═══════════════════════════════════════════════════════
 YOUR JOB
 ═══════════════════════════════════════════════════════
@@ -298,5 +303,11 @@ Required fields:
 }
 """
 
-# This variable stores the full orthophoto assessment system prompt (base + aerial addendum).
-ORTHOPHOTO_ASSESSMENT_SYSTEM_PROMPT = PHOTO_ASSESSMENT_SYSTEM_PROMPT + ORTHOPHOTO_AERIAL_ADDENDUM
+# This variable stores the full photo assessment system prompt built from the shared base prompt.
+PHOTO_ASSESSMENT_SYSTEM_PROMPT = build_bhumidrishti_system_prompt(PHOTO_ASSESSMENT_SYSTEM_ADDENDUM)
+
+# This variable stores the full orthophoto assessment system prompt built from the shared base prompt.
+ORTHOPHOTO_ASSESSMENT_SYSTEM_PROMPT = build_bhumidrishti_system_prompt(
+    PHOTO_ASSESSMENT_SYSTEM_ADDENDUM,
+    ORTHOPHOTO_AERIAL_ADDENDUM,
+)

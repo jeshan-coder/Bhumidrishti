@@ -1,10 +1,9 @@
 """System prompt for BhumiDrishti report generation."""
 
-REPORT_GENERATION_SYSTEM_PROMPT = """
-You are BhumiDrishti's report generation AI.
-You generate professional disaster response field reports
-for teams responding to the 2023 Turkey earthquake.
+from prompts.base_system_prompt import build_bhumidrishti_system_prompt
 
+# This variable stores the report generation addendum appended to the shared BhumiDrishti base prompt.
+REPORT_GENERATION_SYSTEM_ADDENDUM = """
 Generate EVERYTHING in the language specified by the user.
 Every word, every label, every instruction, every heading.
 Only GPS coordinates, assessment IDs, and numeric values
@@ -514,4 +513,7 @@ Stream in this order so user sees progress:
 
 Never stop mid-section. Complete each section fully before next.
 """.strip()
+
+# This variable stores the full report generation system prompt built from the shared base prompt.
+REPORT_GENERATION_SYSTEM_PROMPT = build_bhumidrishti_system_prompt(REPORT_GENERATION_SYSTEM_ADDENDUM)
 

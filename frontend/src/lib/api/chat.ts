@@ -29,7 +29,7 @@ type StreamEvent = {
 
 // This type defines callback hooks used by streaming chat requests.
 type StreamCallbacks = {
-  onThinking: (text: string) => void
+  onThinking: (text: string, mode?: "append" | "replace") => void
   onToken: (token: string) => void
   onToolCall?: (toolName: string, args: Record<string, unknown>) => void
   onToolResult?: (toolName: string, result: Record<string, unknown>) => void
@@ -152,9 +152,15 @@ export async function streamChatRequest(
 
       if (parsed.event === "thinking" && typeof parsed.data === "object" && parsed.data !== null) {
         const text = (parsed.data as { text?: unknown }).text
+        const mode = (parsed.data as { mode?: unknown }).mode
         if (typeof text === "string" && text.length > 0) {
-          thinkingBuffer += text
-          callbacks.onThinking(thinkingBuffer)
+          if (mode === "append") {
+            thinkingBuffer += text
+            callbacks.onThinking(thinkingBuffer, "append")
+          } else {
+            thinkingBuffer = text
+            callbacks.onThinking(thinkingBuffer, "replace")
+          }
         } else {
           callbacks.onThinking("Gemma4 is thinking...")
         }

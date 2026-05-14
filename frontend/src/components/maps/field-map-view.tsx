@@ -648,6 +648,11 @@ export function FieldMapView() {
     geojson: GeoJsonFeatureCollection
   }
 
+  type SelectedBuildingChatContext = {
+    label: string
+    geometry: unknown
+  }
+
   // This variable references the map container element for MapLibre mount.
   const mapContainerRef = useRef<HTMLDivElement | null>(null)
   const mapInstanceRef = useRef<maplibregl.Map | null>(null)
@@ -672,6 +677,8 @@ export function FieldMapView() {
 
   // This variable tracks chat sidebar open state for responsive layout.
   const [isChatSidebarOpen, setIsChatSidebarOpen] = useState(false)
+  // This variable stores hidden selected-building context for Gemma4 chat.
+  const [selectedBuildingChatContext, setSelectedBuildingChatContext] = useState<SelectedBuildingChatContext | null>(null)
 
   // This variable tracks currently selected feature for highlighting.
   const selectedFeatureRef = useRef<{ source: string; id: string | number } | null>(null)
@@ -1692,6 +1699,25 @@ export function FieldMapView() {
     setSingleBldgPickerOpen(true)
   }, [loadExistingSites])
 
+  // This function opens Gemma4 chat with a building-specific tool-use prompt.
+  const handleAskAiAboutBuilding = useCallback((
+    _properties: Record<string, unknown>,
+    _lat: number,
+    _lon: number,
+    geometry?: unknown
+  ) => {
+    if (!geometry) {
+      toast.error("Selected building geometry is unavailable")
+      return
+    }
+    setSelectedBuildingChatContext({
+      label: "Building 1",
+      geometry,
+    })
+    setIsChatSidebarOpen(true)
+    toast.success("Building context added to Gemma4 chat")
+  }, [])
+
   // This function runs after site is confirmed in the single-building picker.
   const confirmSingleBldgAnalysis = useCallback(async () => {
     const pending = pendingBldgRef.current
@@ -2494,6 +2520,7 @@ export function FieldMapView() {
           layerLabel,
           lat: focusLat,
           lon: focusLon,
+          geometry: feature.geometry,
         })
       }
 
@@ -3330,12 +3357,15 @@ export function FieldMapView() {
         isOpen={isChatSidebarOpen}
         onOpenChange={setIsChatSidebarOpen}
         onToolResult={handleChatToolResult}
+        selectedBuildingContext={selectedBuildingChatContext}
+        onClearSelectedBuildingContext={() => setSelectedBuildingChatContext(null)}
       />
 
       <FeatureInfoSidebar
         info={selectedFeatureInfo}
         onClose={handleCloseFeatureInfoSidebar}
         onAnalyseBuilding={handleAnalyseBuilding}
+        onAskAiAboutBuilding={handleAskAiAboutBuilding}
       />
     </div>
   )

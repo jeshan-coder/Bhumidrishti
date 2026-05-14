@@ -25,6 +25,39 @@ OSRM_BASE_URL = os.getenv("OSRM_BASE_URL", "http://osrm:5000")
 # This variable stores the HTTP timeout for OSRM requests in seconds.
 OSRM_TIMEOUT_SECONDS = 15.0
 
+
+def _normalize_building_row(row: asyncpg.Record | None) -> dict[str, Any] | None:
+    """Normalize one turkey_buildings query row into building_data with GeoJSON geometry."""
+    if row is None:
+        return None
+
+    building_data_raw = row.get("building_data")
+    # This variable stores normalized building attributes as a dictionary when available.
+    building_data: dict[str, Any] | None = None
+    if isinstance(building_data_raw, dict):
+        building_data = building_data_raw
+    elif isinstance(building_data_raw, str):
+        try:
+            parsed_building_data = json.loads(building_data_raw)
+            if isinstance(parsed_building_data, dict):
+                building_data = parsed_building_data
+        except json.JSONDecodeError:
+            logger.warning("gis.normalize_building_row.invalid_json")
+
+    if isinstance(building_data, dict):
+        building_data["geom_geojson"] = row.get("geom_geojson")
+
+    return building_data
+
+
+def _parse_geojson_geometry(geometry: dict[str, Any] | str) -> str | None:
+    """Convert a GeoJSON geometry dictionary or string into a JSON string for PostGIS."""
+    if isinstance(geometry, dict):
+        return json.dumps(geometry)
+    if isinstance(geometry, str) and geometry.strip():
+        return geometry.strip()
+    return None
+
 # This variable stores the backend data directory used to resolve DEM paths.
 DATA_DIR = os.getenv("DATA_DIR", "/app/data")
 
@@ -241,6 +274,144 @@ async def query_turkey_building_by_point(
         warnings=["no_building_footprint"],
     )
     logger.info("gis.query_turkey_building_by_point.completed found=%s match=%s", result.found, result.match_strategy)
+    return result
+
+
+async def query_turkey_building_by_osm_id(
+    osm_id: int,
+    db: asyncpg.Connection | asyncpg.Pool,
+) -> TurkeyBuildingQueryResult:
+    """Find building data by turkey_buildings.osm_id."""
+    logger.info("gis.query_turkey_building_by_osm_id.started osm_id=%s", osm_id)
+    query = """
+        SELECT
+            to_jsonb(turkey_buildings) - 'geom' AS building_data,
+            ST_AsGeoJSON(geom)::jsonb AS geom_geojson
+        FROM turkey_buildings
+        WHERE osm_id = $1
+        LIMIT 1
+    """
+    row = await db.fetchrow(query, osm_id)
+    building_data = _normalize_building_row(row)
+    if building_data is None:
+        result = TurkeyBuildingQueryResult(
+            found=False,
+            match_strategy="none",
+            distance_m=None,
+            building_data=None,
+            warnings=["no_building_footprint"],
+        )
+        logger.info("gis.query_turkey_building_by_osm_id.completed found=%s", result.found)
+        return result
+
+    result = TurkeyBuildingQueryResult(
+        found=True,
+        match_strategy="osm_id",
+        distance_m=0.0,
+        building_data=building_data,
+        warnings=[],
+    )
+    logger.info("gis.query_turkey_building_by_osm_id.completed found=%s", result.found)
+    return result
+
+
+async def query_turkey_building_by_geometry(
+    geometry: dict[str, Any] | str,
+    db: asyncpg.Connection | asyncpg.Pool,
+) -> TurkeyBuildingQueryResult:
+    """Find building data using a GeoJSON geometry by intersection area, then nearest centroid fallback."""
+    geometry_text = _parse_geojson_geometry(geometry)
+    logger.info("gis.query_turkey_building_by_geometry.started has_geometry=%s", bool(geometry_text))
+    if geometry_text is None:
+        return TurkeyBuildingQueryResult(
+            found=False,
+            match_strategy="none",
+            distance_m=None,
+            building_data=None,
+            warnings=["invalid_geometry"],
+        )
+
+    intersects_query = """
+        WITH input_geom AS (
+            SELECT ST_SetSRID(ST_GeomFromGeoJSON($1), 4326) AS geom
+        )
+        SELECT
+            to_jsonb(turkey_buildings) - 'geom' AS building_data,
+            ST_AsGeoJSON(turkey_buildings.geom)::jsonb AS geom_geojson,
+            ST_Area(ST_Intersection(turkey_buildings.geom, input_geom.geom)::geography) AS overlap_area_m2
+        FROM turkey_buildings, input_geom
+        WHERE ST_Intersects(turkey_buildings.geom, input_geom.geom)
+        ORDER BY overlap_area_m2 DESC NULLS LAST
+        LIMIT 1
+    """
+
+    nearest_query = """
+        WITH input_geom AS (
+            SELECT ST_SetSRID(ST_GeomFromGeoJSON($1), 4326) AS geom
+        )
+        SELECT
+            to_jsonb(turkey_buildings) - 'geom' AS building_data,
+            ST_AsGeoJSON(turkey_buildings.geom)::jsonb AS geom_geojson,
+            ST_Distance(
+                turkey_buildings.geom::geography,
+                ST_Centroid(input_geom.geom)::geography
+            ) AS distance_m
+        FROM turkey_buildings, input_geom
+        WHERE ST_DWithin(
+            turkey_buildings.geom::geography,
+            ST_Centroid(input_geom.geom)::geography,
+            50
+        )
+        ORDER BY distance_m ASC
+        LIMIT 1
+    """
+
+    try:
+        intersects_row = await db.fetchrow(intersects_query, geometry_text)
+        building_data = _normalize_building_row(intersects_row)
+        if building_data is not None:
+            result = TurkeyBuildingQueryResult(
+                found=True,
+                match_strategy="geometry_intersects",
+                distance_m=0.0,
+                building_data=building_data,
+                warnings=[],
+            )
+            logger.info("gis.query_turkey_building_by_geometry.completed found=%s match=%s", result.found, result.match_strategy)
+            return result
+
+        nearest_row = await db.fetchrow(nearest_query, geometry_text)
+        nearest_building_data = _normalize_building_row(nearest_row)
+        if nearest_building_data is not None:
+            distance_m_raw = nearest_row.get("distance_m") if nearest_row is not None else None
+            distance_m = round(float(distance_m_raw), 2) if isinstance(distance_m_raw, (int, float)) else None
+            result = TurkeyBuildingQueryResult(
+                found=True,
+                match_strategy="geometry_nearest",
+                distance_m=distance_m,
+                building_data=nearest_building_data,
+                warnings=[],
+            )
+            logger.info("gis.query_turkey_building_by_geometry.completed found=%s match=%s", result.found, result.match_strategy)
+            return result
+    except (asyncpg.PostgresError, ValueError, TypeError) as exc:
+        logger.warning("gis.query_turkey_building_by_geometry.failed error=%s", exc)
+        return TurkeyBuildingQueryResult(
+            found=False,
+            match_strategy="none",
+            distance_m=None,
+            building_data=None,
+            warnings=["invalid_geometry"],
+        )
+
+    result = TurkeyBuildingQueryResult(
+        found=False,
+        match_strategy="none",
+        distance_m=None,
+        building_data=None,
+        warnings=["no_building_footprint"],
+    )
+    logger.info("gis.query_turkey_building_by_geometry.completed found=%s", result.found)
     return result
 
 

@@ -23,6 +23,7 @@ from ollama import AsyncClient
 from staticmap import CircleMarker, Line, StaticMap
 
 from models.report import ReportGenerateRequest
+from prompts.base_system_prompt import BHUMIDRISHTI_BASE_SYSTEM_PROMPT
 from prompts.report_system_prompt import REPORT_GENERATION_SYSTEM_PROMPT
 from services.gis import query_osrm_route
 from services.tools import ALL_TOOLS, REPORT_TOOLS
@@ -901,7 +902,13 @@ async def generate_situation_summary(
     async def _noop_token(_: str) -> None:
         return None
 
-    text = await stream_ai_summary(prompt=summary_prompt, on_token=_noop_token, system_prompt=None, db=None, tools=None)
+    text = await stream_ai_summary(
+        prompt=summary_prompt,
+        on_token=_noop_token,
+        system_prompt=BHUMIDRISHTI_BASE_SYSTEM_PROMPT,
+        db=None,
+        tools=None,
+    )
     return {"success": True, "summary": text}
 
 
@@ -921,7 +928,13 @@ async def generate_building_note(
     async def _noop_token(_: str) -> None:
         return None
 
-    text = await stream_ai_summary(prompt=note_prompt, on_token=_noop_token, system_prompt=None, db=None, tools=None)
+    text = await stream_ai_summary(
+        prompt=note_prompt,
+        on_token=_noop_token,
+        system_prompt=BHUMIDRISHTI_BASE_SYSTEM_PROMPT,
+        db=None,
+        tools=None,
+    )
     return {"success": True, "note": text}
 
 
@@ -973,8 +986,8 @@ async def stream_ai_summary(
     try:
         stream_started_at = time.perf_counter()
         messages: list[dict[str, Any]] = []
-        if isinstance(system_prompt, str) and system_prompt.strip():
-            messages.append({"role": "system", "content": system_prompt})
+        active_system_prompt = system_prompt if isinstance(system_prompt, str) and system_prompt.strip() else BHUMIDRISHTI_BASE_SYSTEM_PROMPT
+        messages.append({"role": "system", "content": active_system_prompt})
         messages.append({"role": "user", "content": prompt})
         _log_report_event(
             "report_stream_started",
@@ -982,8 +995,8 @@ async def stream_ai_summary(
                 "model": REPORT_MODEL,
                 "prompt_preview": prompt[:1200],
                 "prompt_chars": len(prompt),
-                "has_system_prompt": bool(system_prompt and system_prompt.strip()),
-                "system_prompt_chars": len(system_prompt or ""),
+                "has_system_prompt": True,
+                "system_prompt_chars": len(active_system_prompt),
                 "tool_count": len(tools or []),
                 "tool_names": [
                     t.get("function", {}).get("name")
@@ -1312,7 +1325,7 @@ def _site_report_prompt(
         "priority_buildings": building_items,
     }
     return (
-        "You are BhumiDrishti reporting assistant. Generate the full field-operational site report in markdown.\n"
+        "Generate the full field-operational site report in markdown.\n"
         f"Language: {_language_name(request.language)} ({request.language}).\n"
         "Output requirements:\n"
         "- Produce complete report narrative; do not say data is missing if fields are present.\n"
@@ -1357,7 +1370,7 @@ def _building_report_prompt(
         "route_steps": route_steps,
     }
     return (
-        "You are BhumiDrishti reporting assistant. Generate complete single-building report markdown for field workers.\n"
+        "Generate complete single-building report markdown for field workers.\n"
         f"Language: {_language_name(request.language)} ({request.language}).\n"
         "Output requirements:\n"
         "- Include one decisive action summary at top.\n"

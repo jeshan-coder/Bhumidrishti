@@ -2,7 +2,7 @@
 
 import { useRef, useState } from "react"
 import type { ComponentPropsWithoutRef } from "react"
-import { MessageCircle, Pencil, RotateCcw } from "lucide-react"
+import { MessageCircle, Pencil, RotateCcw, X } from "lucide-react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { streamChatRequest } from "@/lib/api/chat"
@@ -10,8 +10,14 @@ import { ThinkingBubble } from "@/components/chat/thinking-bubble"
 
 // This type defines one chat message rendered in the sidebar.
 type UiChatMessage = {
-  role: "user" | "assistant"
+  role: "system" | "user" | "assistant"
   content: string
+  hidden?: boolean
+}
+
+type SelectedBuildingChatContext = {
+  label: string
+  geometry: unknown
 }
 
 // This type defines parsed model output split into thinking and final answer parts.
@@ -62,10 +68,18 @@ type FieldMapChatSidebarProps = {
   isOpen: boolean
   onOpenChange: (open: boolean) => void
   onToolResult?: (toolName: string, result: Record<string, unknown>) => void
+  selectedBuildingContext?: SelectedBuildingChatContext | null
+  onClearSelectedBuildingContext?: () => void
 }
 
 // This component renders the field map chat toggle button and chat sidebar.
-export function FieldMapChatSidebar({ isOpen, onOpenChange, onToolResult }: FieldMapChatSidebarProps) {
+export function FieldMapChatSidebar({
+  isOpen,
+  onOpenChange,
+  onToolResult,
+  selectedBuildingContext,
+  onClearSelectedBuildingContext,
+}: FieldMapChatSidebarProps) {
   // This variable controls sidebar visibility (controlled by parent).
   const isSidebarOpen = isOpen
 
@@ -118,7 +132,6 @@ export function FieldMapChatSidebar({ isOpen, onOpenChange, onToolResult }: Fiel
         role: message.role,
         content: message.content,
       }))
-
       let assistantReplyRaw = ""
 
       await streamChatRequest(
@@ -128,10 +141,18 @@ export function FieldMapChatSidebar({ isOpen, onOpenChange, onToolResult }: Fiel
             setThinkingText(text)
           },
           onToolCall: (toolName, args) => {
-            const argsPreview = Object.keys(args).length > 0 ? ` ${JSON.stringify(args)}` : ""
-            setThinkingText(`Calling tool: ${toolName}${argsPreview}`)
+            const hasGeometry = Object.prototype.hasOwnProperty.call(args, "geometry")
+            const toolLabel = toolName === "get_building_info" && hasGeometry
+              ? "Looking up selected building details..."
+              : `Calling local tool: ${toolName}`
+            setThinkingText(toolLabel)
           },
           onToolResult: (toolName, result) => {
+            const resultFound = result.found
+            const statusText = resultFound === false
+              ? `${toolName} finished but did not find a matching record.`
+              : `${toolName} finished. Preparing answer from local data...`
+            setThinkingText(statusText)
             onToolResult?.(toolName, result)
           },
           onToken: (token) => {
@@ -146,7 +167,9 @@ export function FieldMapChatSidebar({ isOpen, onOpenChange, onToolResult }: Fiel
                   setThinkingText(parsed.thinking.trim() || "Gemma4 is thinking...")
                 } else {
                   const assistantAnswer = parsed.answer.trimStart()
-                  setThinkingText("")
+                  if (assistantAnswer.length > 0) {
+                    setThinkingText("")
+                  }
                   updated[lastIndex] = { ...updated[lastIndex], content: assistantAnswer }
                 }
               }
@@ -223,7 +246,31 @@ export function FieldMapChatSidebar({ isOpen, onOpenChange, onToolResult }: Fiel
       return
     }
 
-    await streamAssistantResponse([...messages, nextUserMessage])
+    const messagesWithoutOldMapContext = messages.filter(
+      (message) => !(message.hidden && message.content.startsWith("Persistent current-map context for this chat session."))
+    )
+    const nextMessages = selectedBuildingContext
+      ? [
+          ...messagesWithoutOldMapContext,
+          {
+            role: "system" as const,
+            hidden: true,
+            content: [
+              "Persistent current-map context for this chat session.",
+              `The user selected ${selectedBuildingContext.label} on the field map.`,
+              "When the user refers to this/that/selected building later, use this context.",
+              `geometry=${JSON.stringify(selectedBuildingContext.geometry)}`,
+            ].join("\n"),
+          },
+          nextUserMessage,
+        ]
+      : [...messages, nextUserMessage]
+
+    if (selectedBuildingContext) {
+      onClearSelectedBuildingContext?.()
+    }
+
+    await streamAssistantResponse(nextMessages)
   }
 
   // This function retries a selected user message and regenerates from that point.
@@ -281,14 +328,14 @@ export function FieldMapChatSidebar({ isOpen, onOpenChange, onToolResult }: Fiel
           </div>
 
           <div className="flex-1 space-y-2 overflow-y-auto p-4">
-            {messages.length === 0 ? (
+            {messages.filter((message) => !message.hidden).length === 0 ? (
               <p className="text-xs text-[#5a6b65]">Start by asking Gemma4 about this field area.</p>
             ) : null}
 
-            {messages.map((message, index) => (
+            {messages.map((message, index) => ({ message, originalIndex: index })).filter(({ message }) => !message.hidden).map(({ message, originalIndex }) => (
               <div
-                key={`${message.role}-${index}`}
-                hidden={message.role === "assistant" && !message.content.trim()}
+                key={`${message.role}-${originalIndex}`}
+                hidden={message.role !== "user" && !message.content.trim()}
                 className={
                   message.role === "user"
                     ? "group ml-6 rounded-lg bg-[#0F6E56] px-3 py-2 text-xs text-white"
@@ -315,7 +362,7 @@ export function FieldMapChatSidebar({ isOpen, onOpenChange, onToolResult }: Fiel
                       <div className="mt-2 flex justify-end gap-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
                         <button
                           type="button"
-                          onClick={() => void handleRetryMessage(index)}
+                          onClick={() => void handleRetryMessage(originalIndex)}
                           className="inline-flex h-6 w-6 items-center justify-center rounded border border-white/35 text-white transition-colors hover:bg-white/10"
                           aria-label="Retry question"
                           title="Retry"
@@ -324,7 +371,7 @@ export function FieldMapChatSidebar({ isOpen, onOpenChange, onToolResult }: Fiel
                         </button>
                         <button
                           type="button"
-                          onClick={() => handleEditMessage(index)}
+                          onClick={() => handleEditMessage(originalIndex)}
                           className="inline-flex h-6 w-6 items-center justify-center rounded border border-white/35 text-white transition-colors hover:bg-white/10"
                           aria-label="Edit question"
                           title="Edit"
@@ -349,6 +396,19 @@ export function FieldMapChatSidebar({ isOpen, onOpenChange, onToolResult }: Fiel
           <div className="border-t border-[#D3D1C7] p-3">
             {editingUserMessageIndex !== null ? (
               <p className="mb-2 text-[11px] font-medium text-[#0b5f4b]">Editing selected question…</p>
+            ) : null}
+            {selectedBuildingContext ? (
+              <div className="mb-2 flex items-center justify-between rounded-md border border-[#0F6E56] bg-[#E1F5EE] px-2.5 py-1.5 text-xs text-[#085041]">
+                <span className="font-semibold">{selectedBuildingContext.label}</span>
+                <button
+                  type="button"
+                  onClick={onClearSelectedBuildingContext}
+                  aria-label="Remove selected building context"
+                  className="rounded p-0.5 hover:bg-[#ccebe0]"
+                >
+                  <X size={13} />
+                </button>
+              </div>
             ) : null}
             <textarea
               value={draftMessage}

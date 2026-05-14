@@ -1,7 +1,7 @@
 "use client"
 
 import { useState } from "react"
-import { Maximize2, Minimize2, X } from "lucide-react"
+import { Bot, Maximize2, Minimize2, X } from "lucide-react"
 import { toast } from "sonner"
 import { AssessmentMediaGallery } from "@/components/maps/assessment-media-gallery"
 import type { GisLayerKey } from "@/lib/api/gis-layers"
@@ -13,6 +13,7 @@ export type SelectedFeatureInfo = {
   layerLabel: string
   lat: number
   lon: number
+  geometry?: unknown
 }
 
 // This type defines props for the right-hand sidebar that replaces map popups.
@@ -20,10 +21,11 @@ type FeatureInfoSidebarProps = {
   info: SelectedFeatureInfo | null
   onClose: () => void
   onAnalyseBuilding: (osmId: number, lat: number, lon: number) => void
+  onAskAiAboutBuilding: (properties: Record<string, unknown>, lat: number, lon: number, geometry?: unknown) => void
 }
 
 // This component renders feature details for the currently selected map feature.
-export function FeatureInfoSidebar({ info, onClose, onAnalyseBuilding }: FeatureInfoSidebarProps) {
+export function FeatureInfoSidebar({ info, onClose, onAnalyseBuilding, onAskAiAboutBuilding }: FeatureInfoSidebarProps) {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle")
   const [isExpanded, setIsExpanded] = useState(false)
 
@@ -97,6 +99,7 @@ export function FeatureInfoSidebar({ info, onClose, onAnalyseBuilding }: Feature
             onCopy={handleCopyLocation}
             copyLabel={copyButtonLabel}
             onAnalyseBuilding={onAnalyseBuilding}
+            onAskAiAboutBuilding={(properties) => onAskAiAboutBuilding(properties, info.lat, info.lon, info.geometry)}
           />
         )}
       </div>
@@ -176,6 +179,7 @@ type GenericBodyProps = {
   onCopy: () => void
   copyLabel: string
   onAnalyseBuilding: (osmId: number, lat: number, lon: number) => void
+  onAskAiAboutBuilding: (properties: Record<string, unknown>) => void
 }
 
 function GenericInfoBody({
@@ -186,6 +190,7 @@ function GenericInfoBody({
   onCopy,
   copyLabel,
   onAnalyseBuilding,
+  onAskAiAboutBuilding,
 }: GenericBodyProps) {
   const entries = Object.entries(properties).filter(
     ([key, value]) => value !== null && value !== undefined && value !== "" && key !== "id"
@@ -221,13 +226,23 @@ function GenericInfoBody({
       </div>
 
       {isBuilding && (
-        <button
-          type="button"
-          onClick={() => onAnalyseBuilding(osmId, Number(latitude), Number(longitude))}
-          className="mt-2 w-full rounded-md border border-[#0F6E56] bg-[#0F6E56] px-3 py-2 text-xs font-semibold text-white hover:bg-[#0C614D]"
-        >
-          Analyse Building
-        </button>
+        <div className="mt-2 grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            onClick={() => onAnalyseBuilding(osmId, Number(latitude), Number(longitude))}
+            className="rounded-md border border-[#0F6E56] bg-[#0F6E56] px-3 py-2 text-xs font-semibold text-white hover:bg-[#0C614D]"
+          >
+            Analyse Building
+          </button>
+          <button
+            type="button"
+            onClick={() => onAskAiAboutBuilding(properties)}
+            className="inline-flex items-center justify-center gap-1 rounded-md border border-[#0F6E56] bg-white px-3 py-2 text-xs font-semibold text-[#0F6E56] hover:bg-[#E1F5EE]"
+          >
+            <Bot size={13} />
+            Ask AI
+          </button>
+        </div>
       )}
     </div>
   )

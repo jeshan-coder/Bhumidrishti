@@ -184,7 +184,7 @@ class TurkeyBuildingQueryResult(BaseModel):
     """Result payload for turkey_buildings lookup with spatial match metadata."""
 
     found: bool
-    match_strategy: Literal["contains", "nearest_within_30m", "none"]
+    match_strategy: Literal["contains", "nearest_within_30m", "osm_id", "geometry_intersects", "geometry_nearest", "none"]
     distance_m: float | None = None
     building_data: dict[str, Any] | None = None
     warnings: list[str] = Field(default_factory=list)
