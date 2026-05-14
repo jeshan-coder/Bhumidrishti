@@ -14,7 +14,6 @@ Package structure (one file per tool implementation):
     get_field_workers.py        — backward-compat alias
     dispatch_assessments.py     — assign assessments to a team
     update_assessment_status.py — mark assessments responded/closed
-    execute_read_query.py       — run a safe read-only SELECT query
     get_building_report_data.py — single building data fetcher
     get_building_route.py       — OSRM route between coordinates
 
@@ -429,59 +428,6 @@ COORDINATION_TOOLS: list[dict] = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "execute_read_query",
-            "description": (
-                "Execute a read-only SQL SELECT or PostGIS spatial analysis query against the "
-                "BhumiDrishti PostgreSQL/PostGIS database. "
-                "Use this for complex analysis, cross-table joins, aggregations, or spatial "
-                "queries that no specific tool can express. "
-                "\n\nOnly SELECT and WITH…SELECT (CTE) queries are accepted. "
-                "Mutating keywords (INSERT/UPDATE/DELETE/DROP/CREATE/ALTER/TRUNCATE) are blocked. "
-                "Results are capped at 500 rows unless you supply a LIMIT. "
-                "\n\nAvailable tables: "
-                "assessments (geom GEOMETRY), batches, sites (boundary GEOMETRY), reports, "
-                "field_teams, field_team_members, "
-                "turkey_buildings (geom GEOMETRY), turkey_lines (geom GEOMETRY), "
-                "turkey_points (geom GEOMETRY), turkey_provinces (geom GEOMETRY), "
-                "turkey_districts_pts (geom GEOMETRY). "
-                "\n\nPostGIS spatial patterns you can use: "
-                "ST_Distance(a.geom::geography, b.geom::geography) — metres between two features; "
-                "ST_DWithin(geom::geography, ST_SetSRID(ST_MakePoint(lon,lat),4326)::geography, metres) — radius filter; "
-                "ST_Intersects(a.geom, s.boundary) — overlap check; "
-                "ST_Contains(s.boundary, ST_SetSRID(ST_MakePoint(lon,lat),4326)) — point in polygon; "
-                "ST_Area(geom::geography) — area in m²; "
-                "ST_Centroid(geom) — centroid point; "
-                "ST_AsGeoJSON(geom) — return geometry as GeoJSON string (use this when you want "
-                "readable or displayable geometry in the result); "
-                "ST_AsText(geom) — WKT representation. "
-                "\n\nGeometry rule: always wrap geometry columns with ST_AsGeoJSON(geom) or "
-                "ST_AsText(geom) when you want human-readable output. "
-                "Raw geometry columns (without wrapping) are returned as WKB hex objects with a "
-                "geometry_note hint telling you to re-run with ST_AsGeoJSON. "
-                "\n\nAlways prefer get_assessments / get_sites / get_nearest_shelter first. "
-                "Use this tool only when those tools cannot express the needed query."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "sql": {
-                        "type": "string",
-                        "description": (
-                            "A valid PostgreSQL SELECT or CTE query, optionally with PostGIS functions. "
-                            "Forbidden: INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, TRUNCATE, "
-                            "GRANT, REVOKE, EXECUTE, COPY, --, /*. "
-                            "Include LIMIT to control result size (max 500 rows enforced automatically). "
-                            "Use ST_AsGeoJSON(geom) to return geometry as a GeoJSON string."
-                        ),
-                    },
-                },
-                "required": ["sql"],
-            },
-        },
-    },
 ]
 
 # ---------------------------------------------------------------------------
@@ -633,9 +579,6 @@ async def dispatch_tool(
         elif tool_name == "update_assessment_status":
             from services.tools.update_assessment_status import update_assessment_status  # noqa: PLC0415
             result = await update_assessment_status(tool_args, db)
-        else:  # execute_read_query
-            from services.tools.execute_read_query import execute_read_query  # noqa: PLC0415
-            result = await execute_read_query(tool_args, db)
 
     else:
         result = {"error": f"Unknown tool: {tool_name}"}
