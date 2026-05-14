@@ -43,6 +43,8 @@ Tool usage policy:
   Forbidden invented names (do NOT call these): get_building_info_at_location,
   get_building_info_by_location, get_building_info_by_coordinates,
   get_building_info_by_coords, get_building_info_by_point, get_building_info_by_geometry,
+  get_building_info_from_geometry, get_building_info_from_coordinates,
+  get_building_info_from_location, get_building_info_from_point,
   get_building_by_location, get_building_by_coords, get_building_at_location,
   find_building, lookup_building, or any other variant.
   The ONLY valid assessment tool is "get_assessments" — never "get_assessments_at_location",
