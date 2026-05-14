@@ -45,7 +45,14 @@ def _normalize_building_row(row: asyncpg.Record | None) -> dict[str, Any] | None
             logger.warning("gis.normalize_building_row.invalid_json")
 
     if isinstance(building_data, dict):
-        building_data["geom_geojson"] = row.get("geom_geojson")
+        geom_raw = row.get("geom_geojson")
+        if isinstance(geom_raw, str) and geom_raw.strip():
+            try:
+                geom_raw = json.loads(geom_raw)
+            except json.JSONDecodeError:
+                logger.warning("gis.normalize_building_row.geom_geojson_invalid_json")
+                geom_raw = None
+        building_data["geom_geojson"] = geom_raw
 
     return building_data
 
@@ -219,9 +226,14 @@ async def query_turkey_building_by_point(
             except json.JSONDecodeError:
                 logger.warning("gis.query_turkey_building_by_point.contains_invalid_json lat=%s lon=%s", lat, lon)
 
-        geom_geojson = contains_row.get("geom_geojson")
+        geom_geojson_raw = contains_row.get("geom_geojson")
+        if isinstance(geom_geojson_raw, str) and geom_geojson_raw.strip():
+            try:
+                geom_geojson_raw = json.loads(geom_geojson_raw)
+            except json.JSONDecodeError:
+                geom_geojson_raw = None
         if isinstance(building_data, dict):
-            building_data["geom_geojson"] = geom_geojson
+            building_data["geom_geojson"] = geom_geojson_raw
         result = TurkeyBuildingQueryResult(
             found=True,
             match_strategy="contains",
@@ -247,10 +259,15 @@ async def query_turkey_building_by_point(
             except json.JSONDecodeError:
                 logger.warning("gis.query_turkey_building_by_point.nearest_invalid_json lat=%s lon=%s", lat, lon)
 
-        geom_geojson = nearest_row.get("geom_geojson")
+        geom_geojson_raw = nearest_row.get("geom_geojson")
+        if isinstance(geom_geojson_raw, str) and geom_geojson_raw.strip():
+            try:
+                geom_geojson_raw = json.loads(geom_geojson_raw)
+            except json.JSONDecodeError:
+                geom_geojson_raw = None
         distance_m_raw = nearest_row.get("distance_m")
         if isinstance(building_data, dict):
-            building_data["geom_geojson"] = geom_geojson
+            building_data["geom_geojson"] = geom_geojson_raw
 
         distance_m = None
         if isinstance(distance_m_raw, (int, float)):

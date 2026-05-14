@@ -1,5 +1,6 @@
 """PostgreSQL connection pool management."""
 
+import json
 import os
 import asyncpg
 
@@ -10,6 +11,12 @@ DB_PORT = int(os.getenv("DB_PORT", "5432"))
 DB_NAME = os.getenv("DB_NAME", "bhumidrishti")
 DB_USER = os.getenv("DB_USER", "bhumidrishti")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "bhumidrishti")
+
+
+async def _init_connection(conn: asyncpg.Connection) -> None:
+    """Register JSON/JSONB codecs so asyncpg returns dicts instead of raw strings."""
+    await conn.set_type_codec("json", encoder=json.dumps, decoder=json.loads, schema="pg_catalog")
+    await conn.set_type_codec("jsonb", encoder=json.dumps, decoder=json.loads, schema="pg_catalog")
 
 
 async def init_pool() -> None:
@@ -23,6 +30,7 @@ async def init_pool() -> None:
         database=DB_NAME,
         min_size=1,
         max_size=5,
+        init=_init_connection,
     )
 
 

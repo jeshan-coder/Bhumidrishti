@@ -38,10 +38,14 @@ Tool usage policy:
 - If user asks a specific question (for example only building info), call only the relevant tool.
 - Call multiple tools only when user asks for a broader analysis.
 - There is only one building information tool: get_building_info.
-- NEVER invent tool names. The ONLY valid name is exactly "get_building_info".
+- NEVER invent tool names. The ONLY valid building tool name is exactly "get_building_info".
   Forbidden invented names (do NOT call these): get_building_info_at_location,
-  get_building_info_by_coordinates, get_building_info_by_geometry,
-  get_building_by_location, get_building_at_location, or any other variant.
+  get_building_info_by_location, get_building_info_by_coordinates,
+  get_building_info_by_coords, get_building_info_by_point, get_building_info_by_geometry,
+  get_building_by_location, get_building_by_coords, get_building_at_location,
+  find_building, lookup_building, or any other variant.
+  The ONLY valid assessment tool is "get_assessments" — never "get_assessments_at_location",
+  "get_assessments_by_location", "get_assessments_by_coords", or any variant.
 - get_building_info accepts three lookup modes — use whichever the user provides:
   a) lat + lon (decimal degrees) → when the user gives GPS coordinates.
      Always use parameter name "lon" (not "lng", not "longitude").
@@ -146,7 +150,7 @@ async def chat_with_gemma_stream(payload: ChatRequest) -> StreamingResponse:
 
             messages = _build_messages(payload)
             has_streamed_token = False
-            max_iterations = 2
+            max_iterations = 5
             iteration = 0
             force_answer_without_tools = False
 

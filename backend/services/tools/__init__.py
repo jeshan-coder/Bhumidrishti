@@ -512,12 +512,27 @@ _logger = _logging.getLogger(__name__)
 # Common tool-name hallucinations the model emits → canonical name.
 # These are logged as warnings so they're easy to spot in production.
 _TOOL_ALIASES: dict[str, str] = {
+    # ---- get_building_info variants ----
     "get_building_info_at_location": "get_building_info",
+    "get_building_info_by_location": "get_building_info",
     "get_building_info_by_coordinates": "get_building_info",
+    "get_building_info_by_coords": "get_building_info",
+    "get_building_info_by_coord": "get_building_info",
     "get_building_info_by_point": "get_building_info",
     "get_building_info_by_geometry": "get_building_info",
     "get_building_by_location": "get_building_info",
+    "get_building_by_coords": "get_building_info",
     "get_building_at_location": "get_building_info",
+    "get_building_at_coords": "get_building_info",
+    "find_building": "get_building_info",
+    "lookup_building": "get_building_info",
+    "building_info": "get_building_info",
+    # ---- get_assessments variants ----
+    "get_assessments_at_location": "get_assessments",
+    "get_assessments_by_location": "get_assessments",
+    "get_assessments_by_coords": "get_assessments",
+    "get_assessments_by_point": "get_assessments",
+    "find_assessments": "get_assessments",
 }
 
 
