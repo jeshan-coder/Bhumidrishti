@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
-import { ChevronDown, ChevronUp } from "lucide-react"
+import { Check, ChevronDown, ChevronUp, Copy } from "lucide-react"
 
 type ThinkingBubbleProps = {
   text: string
@@ -13,6 +13,7 @@ type ThinkingBubbleProps = {
 // an expand / collapse toggle so the thought log never overruns the viewport.
 export function ThinkingBubble({ text, resetKey }: ThinkingBubbleProps) {
   const [isExpanded, setIsExpanded] = useState(false)
+  const [copied, setCopied] = useState(false)
   const scrollRef = useRef<HTMLDivElement | null>(null)
 
   // Collapse again whenever a new thinking session starts (new user prompt).
@@ -27,6 +28,13 @@ export function ThinkingBubble({ text, resetKey }: ThinkingBubbleProps) {
     node.scrollTop = node.scrollHeight
   }, [text])
 
+  const handleCopy = () => {
+    void navigator.clipboard.writeText(text).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    })
+  }
+
   if (!text) return null
 
   return (
@@ -35,22 +43,33 @@ export function ThinkingBubble({ text, resetKey }: ThinkingBubbleProps) {
         <p className="text-[10px] font-semibold uppercase tracking-wide text-[#3A6F61]">
           Thinking
         </p>
-        <button
-          type="button"
-          onClick={() => setIsExpanded((prev) => !prev)}
-          className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium text-[#0b5f4b] hover:bg-[#E1F5EE]"
-          aria-label={isExpanded ? "Collapse thinking" : "Expand thinking"}
-        >
-          {isExpanded ? (
-            <>
-              <ChevronUp size={12} /> Collapse
-            </>
-          ) : (
-            <>
-              <ChevronDown size={12} /> Expand
-            </>
-          )}
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={handleCopy}
+            className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium text-[#0b5f4b] hover:bg-[#E1F5EE]"
+            aria-label="Copy thinking text"
+            title="Copy thinking"
+          >
+            {copied ? <Check size={12} /> : <Copy size={12} />}
+          </button>
+          <button
+            type="button"
+            onClick={() => setIsExpanded((prev) => !prev)}
+            className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium text-[#0b5f4b] hover:bg-[#E1F5EE]"
+            aria-label={isExpanded ? "Collapse thinking" : "Expand thinking"}
+          >
+            {isExpanded ? (
+              <>
+                <ChevronUp size={12} /> Collapse
+              </>
+            ) : (
+              <>
+                <ChevronDown size={12} /> Expand
+              </>
+            )}
+          </button>
+        </div>
       </div>
 
       <div

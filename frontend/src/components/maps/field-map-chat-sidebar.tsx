@@ -2,7 +2,7 @@
 
 import { useRef, useState } from "react"
 import type { ComponentPropsWithoutRef } from "react"
-import { MessageCircle, Pencil, RotateCcw, X } from "lucide-react"
+import { Check, Copy, MessageCircle, Pencil, RotateCcw, X } from "lucide-react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { streamChatRequest } from "@/lib/api/chat"
@@ -147,6 +147,9 @@ export function FieldMapChatSidebar({
 
   // This variable tracks which user message is being edited before resend.
   const [editingUserMessageIndex, setEditingUserMessageIndex] = useState<number | null>(null)
+
+  // This variable tracks which assistant message was most recently copied (for checkmark flash).
+  const [copiedMessageIndex, setCopiedMessageIndex] = useState<number | null>(null)
 
   // This function identifies browser abort errors from cancelled streaming requests.
   const isAbortError = (error: unknown): boolean => {
@@ -386,22 +389,42 @@ export function FieldMapChatSidebar({
                 className={
                   message.role === "user"
                     ? "group ml-6 rounded-lg bg-[#0F6E56] px-3 py-2 text-xs text-white"
-                    : "mr-6 rounded-lg bg-[#E1F5EE] px-3 py-2 text-xs text-[#085041]"
+                    : "group mr-6 rounded-lg bg-[#E1F5EE] px-3 py-2 text-xs text-[#085041]"
                 }
               >
                 {message.role === "assistant" ? (
-                  <ReactMarkdown
-                    remarkPlugins={[remarkGfm]}
-                    components={{
-                      p: ({ children }: ComponentPropsWithoutRef<"p">) => <p className="mb-2 last:mb-0">{children}</p>,
-                      ul: ({ children }: ComponentPropsWithoutRef<"ul">) => <ul className="mb-2 list-disc space-y-1 pl-4 last:mb-0">{children}</ul>,
-                      ol: ({ children }: ComponentPropsWithoutRef<"ol">) => <ol className="mb-2 list-decimal space-y-1 pl-4 last:mb-0">{children}</ol>,
-                      code: ({ children }: ComponentPropsWithoutRef<"code">) => <code className="rounded bg-[#d8efe8] px-1 py-0.5 font-mono text-[11px]">{children}</code>,
-                      pre: ({ children }: ComponentPropsWithoutRef<"pre">) => <pre className="mb-2 overflow-x-auto rounded bg-[#d8efe8] p-2 text-[11px] last:mb-0">{children}</pre>,
-                    }}
-                  >
-                    {message.content}
-                  </ReactMarkdown>
+                  <>
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      components={{
+                        p: ({ children }: ComponentPropsWithoutRef<"p">) => <p className="mb-2 last:mb-0">{children}</p>,
+                        ul: ({ children }: ComponentPropsWithoutRef<"ul">) => <ul className="mb-2 list-disc space-y-1 pl-4 last:mb-0">{children}</ul>,
+                        ol: ({ children }: ComponentPropsWithoutRef<"ol">) => <ol className="mb-2 list-decimal space-y-1 pl-4 last:mb-0">{children}</ol>,
+                        code: ({ children }: ComponentPropsWithoutRef<"code">) => <code className="rounded bg-[#d8efe8] px-1 py-0.5 font-mono text-[11px]">{children}</code>,
+                        pre: ({ children }: ComponentPropsWithoutRef<"pre">) => <pre className="mb-2 overflow-x-auto rounded bg-[#d8efe8] p-2 text-[11px] last:mb-0">{children}</pre>,
+                      }}
+                    >
+                      {message.content}
+                    </ReactMarkdown>
+                    {!isSending && message.content.trim() ? (
+                      <div className="mt-1.5 flex justify-end opacity-0 transition-opacity duration-150 group-hover:opacity-100">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void navigator.clipboard.writeText(message.content).then(() => {
+                              setCopiedMessageIndex(originalIndex)
+                              setTimeout(() => setCopiedMessageIndex(null), 1500)
+                            })
+                          }}
+                          className="inline-flex h-6 w-6 items-center justify-center rounded border border-[#0b5f4b]/25 text-[#0b5f4b] transition-colors hover:bg-[#d0ece3]"
+                          aria-label="Copy response"
+                          title="Copy"
+                        >
+                          {copiedMessageIndex === originalIndex ? <Check size={12} /> : <Copy size={12} />}
+                        </button>
+                      </div>
+                    ) : null}
+                  </>
                 ) : (
                   <>
                     <p>{message.content}</p>
