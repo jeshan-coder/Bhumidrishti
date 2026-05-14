@@ -28,8 +28,10 @@ type StreamEvent = {
 }
 
 // This type defines callback hooks used by streaming chat requests.
+// onThinking receives status label text (replace) or accumulated model-reasoning text (append).
 type StreamCallbacks = {
-  onThinking: (text: string, mode?: "append" | "replace") => void
+  onThinkingStatus: (text: string) => void
+  onThinkingModel: (text: string) => void
   onToken: (token: string) => void
   onToolCall?: (toolName: string, args: Record<string, unknown>) => void
   onToolResult?: (toolName: string, result: Record<string, unknown>) => void
@@ -104,7 +106,7 @@ export async function streamChatRequest(
   callbacks: StreamCallbacks,
   options?: StreamRequestOptions
 ): Promise<void> {
-  callbacks.onThinking("Gemma4 is thinking...")
+  callbacks.onThinkingStatus("Gemma4 is thinking...")
 
   const response = await fetch(`${API_BASE_URL}/chat/stream`, {
     method: "POST",
@@ -131,7 +133,10 @@ export async function streamChatRequest(
   const decoder = new TextDecoder()
   let buffer = ""
   let receivedDoneEvent = false
-  let thinkingBuffer = ""
+  // Status text (replace-mode thinking events — tool labels, iteration status)
+  let statusBuffer = ""
+  // Model reasoning text (append-mode thinking events — actual model <think> tokens)
+  let modelThinkingBuffer = ""
 
   while (true) {
     const { done, value } = await reader.read()
@@ -155,14 +160,16 @@ export async function streamChatRequest(
         const mode = (parsed.data as { mode?: unknown }).mode
         if (typeof text === "string" && text.length > 0) {
           if (mode === "append") {
-            thinkingBuffer += text
-            callbacks.onThinking(thinkingBuffer, "append")
+            // Model internal reasoning — accumulate separately from status labels
+            modelThinkingBuffer += text
+            callbacks.onThinkingModel(modelThinkingBuffer)
           } else {
-            thinkingBuffer = text
-            callbacks.onThinking(thinkingBuffer, "replace")
+            // Status label from backend (tool call, iteration status) — replaces
+            statusBuffer = text
+            callbacks.onThinkingStatus(statusBuffer)
           }
         } else {
-          callbacks.onThinking("Gemma4 is thinking...")
+          callbacks.onThinkingStatus("Gemma4 is thinking...")
         }
         continue
       }

@@ -92,8 +92,11 @@ export function FieldMapChatSidebar({
   // This variable tracks active streaming request state.
   const [isSending, setIsSending] = useState(false)
 
-  // This variable stores live model thinking text emitted via SSE before/while response forms.
-  const [thinkingText, setThinkingText] = useState("")
+  // This variable stores the current status label (tool call, iteration progress).
+  const [thinkingStatus, setThinkingStatus] = useState("")
+
+  // This variable stores the accumulated model reasoning text from <think> SSE tokens.
+  const [modelThinkingText, setModelThinkingText] = useState("")
 
   // This variable stores an active abort controller for mid-stream cancellation.
   const activeStreamAbortControllerRef = useRef<AbortController | null>(null)
@@ -113,7 +116,8 @@ export function FieldMapChatSidebar({
   // This function aborts the active stream and restores input controls.
   const handleStopStreaming = () => {
     activeStreamAbortControllerRef.current?.abort()
-    setThinkingText("")
+    setThinkingStatus("")
+    setModelThinkingText("")
     setIsSending(false)
   }
 
@@ -125,7 +129,8 @@ export function FieldMapChatSidebar({
     setMessages([...nextMessages, { role: "assistant", content: "" }])
     setDraftMessage("")
     setIsSending(true)
-    setThinkingText("Gemma4 is thinking...")
+    setThinkingStatus("Gemma4 is thinking...")
+    setModelThinkingText("")
 
     try {
       const chatPayload = nextMessages.map((message) => ({
@@ -137,22 +142,26 @@ export function FieldMapChatSidebar({
       await streamChatRequest(
         chatPayload,
         {
-          onThinking: (text) => {
-            setThinkingText(text)
+          onThinkingStatus: (text) => {
+            setThinkingStatus(text)
+          },
+          onThinkingModel: (text) => {
+            setModelThinkingText(text)
           },
           onToolCall: (toolName, args) => {
             const hasGeometry = Object.prototype.hasOwnProperty.call(args, "geometry")
             const toolLabel = toolName === "get_building_info" && hasGeometry
               ? "Looking up selected building details..."
-              : `Calling local tool: ${toolName}`
-            setThinkingText(toolLabel)
+              : `Calling: ${toolName}`
+            setThinkingStatus(toolLabel)
           },
           onToolResult: (toolName, result) => {
             const resultFound = result.found
-            const statusText = resultFound === false
-              ? `${toolName} finished but did not find a matching record.`
-              : `${toolName} finished. Preparing answer from local data...`
-            setThinkingText(statusText)
+            setThinkingStatus(
+              resultFound === false
+                ? `${toolName}: no match found`
+                : `${toolName}: done — preparing answer…`
+            )
             onToolResult?.(toolName, result)
           },
           onToken: (token) => {
@@ -164,11 +173,12 @@ export function FieldMapChatSidebar({
               const lastIndex = updated.length - 1
               if (lastIndex >= 0 && updated[lastIndex].role === "assistant") {
                 if (parsed.hasExplicitThinking && !parsed.thinkingCompleted) {
-                  setThinkingText(parsed.thinking.trim() || "Gemma4 is thinking...")
+                  // <think> still open — stream into model thinking box
+                  setModelThinkingText(parsed.thinking.trim())
                 } else {
                   const assistantAnswer = parsed.answer.trimStart()
                   if (assistantAnswer.length > 0) {
-                    setThinkingText("")
+                    setThinkingStatus("")
                   }
                   updated[lastIndex] = { ...updated[lastIndex], content: assistantAnswer }
                 }
@@ -178,7 +188,7 @@ export function FieldMapChatSidebar({
           },
           onDone: () => {
             const parsed = parseModelStream(assistantReplyRaw)
-            setThinkingText("")
+            setThinkingStatus("")
             if (!parsed.answer.trim()) {
               setMessages((currentMessages) => {
                 const updated = [...currentMessages]
@@ -225,7 +235,8 @@ export function FieldMapChatSidebar({
       if (activeStreamAbortControllerRef.current === streamAbortController) {
         activeStreamAbortControllerRef.current = null
       }
-      setThinkingText("")
+      setThinkingStatus("")
+      setModelThinkingText("")
       setIsSending(false)
     }
   }
@@ -385,11 +396,21 @@ export function FieldMapChatSidebar({
               </div>
             ))}
 
-            {isSending && thinkingText ? (
-              <ThinkingBubble
-                text={thinkingText}
-                resetKey={messages.filter((m) => m.role === "user").length}
-              />
+            {isSending && (thinkingStatus || modelThinkingText) ? (
+              <div className="mr-6 space-y-1">
+                {thinkingStatus ? (
+                  <p className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-[#3A6F61]">
+                    <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-[#0F6E56]" />
+                    {thinkingStatus}
+                  </p>
+                ) : null}
+                {modelThinkingText ? (
+                  <ThinkingBubble
+                    text={modelThinkingText}
+                    resetKey={messages.filter((m) => m.role === "user").length}
+                  />
+                ) : null}
+              </div>
             ) : null}
           </div>
 
