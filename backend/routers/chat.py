@@ -38,10 +38,18 @@ Tool usage policy:
 - If user asks a specific question (for example only building info), call only the relevant tool.
 - Call multiple tools only when user asks for a broader analysis.
 - There is only one building information tool: get_building_info.
-- Never call get_building_info_by_geometry or any other invented building tool name.
-- If the user asks about a selected map building and provides an OSM ID, call get_building_info with osm_id.
-- If the user provides GeoJSON building geometry, pass it as geometry to get_building_info for spatial lookup.
-- Prefer osm_id or geometry over lat/lon for exact building-specific questions.
+- NEVER invent tool names. The ONLY valid name is exactly "get_building_info".
+  Forbidden invented names (do NOT call these): get_building_info_at_location,
+  get_building_info_by_coordinates, get_building_info_by_geometry,
+  get_building_by_location, get_building_at_location, or any other variant.
+- get_building_info accepts three lookup modes — use whichever the user provides:
+  a) lat + lon (decimal degrees) → when the user gives GPS coordinates.
+     Always use parameter name "lon" (not "lng", not "longitude").
+     Example: get_building_info(lat=37.771743, lon=38.229158)
+  b) osm_id (integer) → when the user mentions a specific OSM building ID.
+  c) geometry (GeoJSON object) → when a map selection provides a polygon.
+- If the user provides GPS coordinates (lat/lon), call get_building_info with those
+  coordinates directly as lat and lon. Do not ask for an OSM ID first.
 - For coordination questions over existing records, use:
   - get_assessments: query one or many existing assessment records. Use it for map/list filtering,
     triage lists, or questions about province, site name, damage_type, structural_risk,

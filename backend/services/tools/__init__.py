@@ -505,6 +505,44 @@ ALL_TOOL_NAMES: frozenset[str] = (
 
 _logger = _logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# NORMALISATION TABLES
+# ---------------------------------------------------------------------------
+
+# Common tool-name hallucinations the model emits → canonical name.
+# These are logged as warnings so they're easy to spot in production.
+_TOOL_ALIASES: dict[str, str] = {
+    "get_building_info_at_location": "get_building_info",
+    "get_building_info_by_coordinates": "get_building_info",
+    "get_building_info_by_point": "get_building_info",
+    "get_building_info_by_geometry": "get_building_info",
+    "get_building_by_location": "get_building_info",
+    "get_building_at_location": "get_building_info",
+}
+
+
+def _normalise_tool_args(tool_name: str, tool_args: dict[_Any, _Any]) -> dict[str, _Any]:
+    """Return a normalised copy of tool_args, fixing common model mistakes."""
+    args = dict(tool_args)
+
+    # Gemma sometimes emits 'lng' instead of the schema-defined 'lon'.
+    if "lng" in args and "lon" not in args:
+        _logger.warning(
+            "tools.dispatch.param_normalised tool=%s key=lng→lon value=%s",
+            tool_name, args["lng"],
+        )
+        args["lon"] = args.pop("lng")
+
+    # Gemma sometimes emits 'longitude'/'latitude' long-forms.
+    if "longitude" in args and "lon" not in args:
+        _logger.warning("tools.dispatch.param_normalised tool=%s key=longitude→lon", tool_name)
+        args["lon"] = args.pop("longitude")
+    if "latitude" in args and "lat" not in args:
+        _logger.warning("tools.dispatch.param_normalised tool=%s key=latitude→lat", tool_name)
+        args["lat"] = args.pop("latitude")
+
+    return args
+
 
 # ---------------------------------------------------------------------------
 # UNIFIED DISPATCHER
@@ -518,6 +556,19 @@ async def dispatch_tool(
 ) -> dict[str, _Any]:
     """Route a tool call to its dedicated implementation module."""
     started_at = _time.perf_counter()
+
+    # Resolve alias first so all downstream checks use the canonical name.
+    canonical = _TOOL_ALIASES.get(tool_name)
+    if canonical is not None:
+        _logger.warning(
+            "tools.dispatch.alias_resolved hallucinated=%s canonical=%s args=%s",
+            tool_name, canonical, tool_args,
+        )
+        tool_name = canonical
+
+    # Normalise common parameter-name mistakes before routing.
+    tool_args = _normalise_tool_args(tool_name, tool_args)
+
     _logger.info("tools.dispatch tool=%s args=%s", tool_name, tool_args)
 
     # ---- Report-specific tools ----------------------------------------
