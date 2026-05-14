@@ -178,8 +178,6 @@ async def chat_with_gemma_stream(payload: ChatRequest) -> StreamingResponse:
     async def event_generator() -> AsyncIterator[str]:
         try:
             logger.info("chat.stream.started messages=%s temperature=%s", len(payload.messages), payload.temperature)
-            yield _sse_event("thinking", {"text": "Gemma4 is thinking..."})
-            await asyncio.sleep(0)
 
             messages = _build_messages(payload)
             has_streamed_token = False
@@ -193,9 +191,6 @@ async def chat_with_gemma_stream(payload: ChatRequest) -> StreamingResponse:
             while iteration < max_iterations:
                 iteration += 1
                 logger.info("chat.stream.iteration.started iteration=%s", iteration)
-                thinking_text = "Preparing answer from local tool results..." if force_answer_without_tools else "Choosing the right local tool..."
-                yield _sse_event("thinking", {"text": thinking_text})
-                await asyncio.sleep(0)
                 chat_kwargs: dict[str, Any] = {
                     "model": MODEL_NAME,
                     "messages": messages,

@@ -63,6 +63,50 @@ function parseModelStream(rawText: string): ParsedModelStream {
   }
 }
 
+// This function builds a human-readable label for a tool call event.
+function formatToolCallLabel(toolName: string, args: Record<string, unknown>): string {
+  const lat = typeof args.lat === "number" ? args.lat.toFixed(4) : null
+  const lon = typeof args.lon === "number" ? args.lon.toFixed(4) : null
+  const coords = lat && lon ? ` (${lat}, ${lon})` : ""
+
+  switch (toolName) {
+    case "get_building_info":
+      if (args.osm_id) return `get_building_info → OSM #${args.osm_id}`
+      if (args.province) return `get_building_info → ${args.province}`
+      if (args.geometry) return `get_building_info → selected polygon`
+      return `get_building_info${coords}`
+    case "get_flood_zone":         return `get_flood_zone${coords}`
+    case "get_location_info":      return `get_location_info${coords}`
+    case "get_nearest_road":       return `get_nearest_road${coords}`
+    case "get_elevation_slope":    return `get_elevation_slope${coords}`
+    case "get_nearest_shelter":    return `get_nearest_shelter${coords}`
+    case "get_assessments": {
+      const hints: string[] = []
+      if (args.province)      hints.push(`${args.province}`)
+      if (args.site_name)     hints.push(`site: ${args.site_name}`)
+      if (args.severity_min)  hints.push(`sev ≥${args.severity_min}`)
+      if (args.severity_max)  hints.push(`sev ≤${args.severity_max}`)
+      if (args.status)        hints.push(`${args.status}`)
+      if (args.occupant_status) hints.push(`${args.occupant_status}`)
+      if (args.assessment_id) hints.push(`${args.assessment_id}`)
+      return `get_assessments${hints.length ? ` (${hints.join(", ")})` : ""}`
+    }
+    case "get_sites":
+      return `get_sites${args.site_name ? ` → ${args.site_name}` : ""}`
+    case "get_field_teams":
+    case "get_field_workers":
+      return `get_field_teams${args.status ? ` (${args.status})` : ""}`
+    case "dispatch_assessments":
+      return `dispatch_assessments → ${args.team_name ?? args.worker_name ?? "team"}`
+    case "update_assessment_status":
+      return `update_status → ${args.assessment_id ?? "assessments"}: ${args.status}`
+    case "execute_read_query":
+      return `execute_read_query (SQL)`
+    default:
+      return toolName
+  }
+}
+
 // This type defines props for controlled sidebar state.
 type FieldMapChatSidebarProps = {
   isOpen: boolean
@@ -129,7 +173,7 @@ export function FieldMapChatSidebar({
     setMessages([...nextMessages, { role: "assistant", content: "" }])
     setDraftMessage("")
     setIsSending(true)
-    setThinkingStatus("Gemma4 is thinking...")
+    setThinkingStatus("")
     setModelThinkingText("")
 
     try {
@@ -149,19 +193,11 @@ export function FieldMapChatSidebar({
             setModelThinkingText(text)
           },
           onToolCall: (toolName, args) => {
-            const hasGeometry = Object.prototype.hasOwnProperty.call(args, "geometry")
-            const toolLabel = toolName === "get_building_info" && hasGeometry
-              ? "Looking up selected building details..."
-              : `Calling: ${toolName}`
-            setThinkingStatus(toolLabel)
+            setThinkingStatus(formatToolCallLabel(toolName, args))
           },
           onToolResult: (toolName, result) => {
-            const resultFound = result.found
-            setThinkingStatus(
-              resultFound === false
-                ? `${toolName}: no match found`
-                : `${toolName}: done — preparing answer…`
-            )
+            const notFound = result.found === false || (result.items !== undefined && Array.isArray(result.items) && (result.items as unknown[]).length === 0)
+            setThinkingStatus(notFound ? `${toolName} → no results` : `${toolName} → done`)
             onToolResult?.(toolName, result)
           },
           onToken: (token) => {
@@ -396,14 +432,14 @@ export function FieldMapChatSidebar({
               </div>
             ))}
 
-            {isSending && (thinkingStatus || modelThinkingText) ? (
+            {isSending ? (
               <div className="mr-6 space-y-1">
-                {thinkingStatus ? (
-                  <p className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-[#3A6F61]">
-                    <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-[#0F6E56]" />
-                    {thinkingStatus}
-                  </p>
-                ) : null}
+                {/* Status line — shows tool name + args, or a bare pulse dot while waiting */}
+                <p className="flex items-center gap-1.5 text-[10px] font-mono text-[#3A6F61]">
+                  <span className="inline-block h-1.5 w-1.5 flex-shrink-0 animate-pulse rounded-full bg-[#0F6E56]" />
+                  {thinkingStatus || <span className="opacity-40">waiting…</span>}
+                </p>
+                {/* Model reasoning stream — only shown when the model emits <think> tokens */}
                 {modelThinkingText ? (
                   <ThinkingBubble
                     text={modelThinkingText}
