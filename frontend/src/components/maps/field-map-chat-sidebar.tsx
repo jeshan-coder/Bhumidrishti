@@ -7,7 +7,105 @@ import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { streamChatRequest } from "@/lib/api/chat"
 import { ThinkingBubble } from "@/components/chat/thinking-bubble"
-import { ToolCallCard, BatchProgressCard, toolResultSummary, type ToolCallStatus, type ActiveBatch } from "@/components/chat/tool-call-card"
+import { ToolCallCard, toolResultSummary, type ToolCallStatus, type ActiveBatch, type BatchBuildingEvent } from "@/components/chat/tool-call-card"
+
+// ── Batch chat stream ──────────────────────────────────────────────────────
+
+function BatchChatStream({ batch }: { batch: ActiveBatch }) {
+  const doneCount = batch.processed + batch.failed + batch.skipped
+  const pct = batch.total > 0 ? Math.round((doneCount / batch.total) * 100) : 0
+
+  return (
+    <div className="space-y-1.5">
+      {/* Progress header */}
+      <div className={`rounded-lg border px-3 py-2 text-xs ${
+        batch.done
+          ? batch.stopped ? "border-zinc-200 bg-zinc-50" : "border-emerald-200 bg-emerald-50"
+          : "border-blue-200 bg-blue-50"
+      }`}>
+        <div className="mb-1.5 flex items-center gap-1.5">
+          <span className="shrink-0 select-none">
+            {batch.done ? (batch.stopped ? "⏹" : "✅") : "🔄"}
+          </span>
+          <span className={`font-semibold ${
+            batch.done ? (batch.stopped ? "text-zinc-600" : "text-emerald-900") : "text-blue-900"
+          }`}>
+            {batch.done
+              ? batch.stopped ? "Batch stopped" : "Analysis complete"
+              : `Analysing — ${batch.siteName || "site"}`}
+          </span>
+          <span className={`ml-auto font-mono text-[10px] ${batch.done ? "text-zinc-400" : "text-blue-500"}`}>
+            {doneCount}/{batch.total}
+          </span>
+        </div>
+        <div className="h-1 overflow-hidden rounded-full bg-white/70">
+          <div
+            className={`h-full rounded-full transition-all duration-500 ${
+              batch.done ? (batch.stopped ? "bg-zinc-400" : "bg-emerald-500") : "bg-blue-500"
+            }`}
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+        {(batch.processed > 0 || batch.failed > 0 || batch.skipped > 0) && (
+          <div className="mt-1 flex flex-wrap gap-x-2.5 gap-y-0.5 text-[10px]">
+            {batch.processed > 0 && <span className="text-emerald-700">{batch.processed} done</span>}
+            {batch.failed   > 0 && <span className="text-red-600">{batch.failed} failed</span>}
+            {batch.skipped  > 0 && <span className="text-zinc-400">{batch.skipped} skipped</span>}
+            {batch.tokensUsed > 0 && (
+              <span className="ml-auto text-zinc-400">
+                {batch.tokensUsed >= 1_000_000
+                  ? `${(batch.tokensUsed / 1_000_000).toFixed(1)}M`
+                  : batch.tokensUsed >= 1000
+                  ? `${Math.round(batch.tokensUsed / 1000)}k`
+                  : batch.tokensUsed} tok
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Completed buildings */}
+      {(batch.events as BatchBuildingEvent[]).map((ev) => (
+        <div
+          key={ev.osm_id}
+          className={`flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-[11px] ${
+            ev.status === "done"
+              ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+              : ev.status === "failed"
+              ? "border-red-200 bg-red-50 text-red-700"
+              : "border-zinc-200 bg-zinc-50 text-zinc-500"
+          }`}
+        >
+          <span>{ev.status === "done" ? "✓" : ev.status === "failed" ? "✗" : "⏭"}</span>
+          <span className="font-mono text-[10px]">OSM:{ev.osm_id}</span>
+          {ev.severity != null && (
+            <span className="ml-auto font-semibold text-[10px]">SEV {ev.severity}</span>
+          )}
+          {ev.status === "skipped" && <span className="ml-auto text-[10px]">skipped</span>}
+          {ev.status === "failed" && ev.error && (
+            <span className="ml-auto max-w-[14ch] truncate text-[10px]">{ev.error}</span>
+          )}
+        </div>
+      ))}
+
+      {/* Currently processing building */}
+      {!batch.done && batch.currentOsmId != null && (
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-1.5 text-[11px] text-blue-700">
+            <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-blue-500" />
+            <span className="font-mono text-[10px]">OSM:{batch.currentOsmId}</span>
+            {batch.currentStage && batch.currentStage !== "processing" && (
+              <span className="text-[10px] text-blue-400">{batch.currentStage.replace(/_/g, " ")}</span>
+            )}
+          </div>
+          {batch.currentThought && (
+            <ThinkingBubble text={batch.currentThought} resetKey={batch.currentOsmId} />
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
 
 // ── Message types ──────────────────────────────────────────────────────────
 
@@ -319,7 +417,7 @@ export function FieldMapChatSidebar({
 
           {/* Message list */}
           <div className="flex-1 space-y-2 overflow-y-auto p-4">
-            {activeBatch && <BatchProgressCard batch={activeBatch} />}
+            {activeBatch && <BatchChatStream batch={activeBatch} />}
 
             {visibleMsgs.length === 0 && !activeBatch && (
               <p className="text-xs text-[#5a6b65]">Start by asking Gemma4 about this field area.</p>

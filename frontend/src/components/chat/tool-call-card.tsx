@@ -2,7 +2,14 @@
 
 export type ToolCallStatus = "running" | "done" | "empty"
 
-// ── Batch progress card ────────────────────────────────────────────────────
+// ── Batch types ────────────────────────────────────────────────────────────
+
+export type BatchBuildingEvent = {
+  osm_id: number
+  status: "done" | "skipped" | "failed"
+  severity?: number
+  error?: string
+}
 
 export type ActiveBatch = {
   batchId: string
@@ -13,67 +20,11 @@ export type ActiveBatch = {
   skipped: number
   done: boolean
   stopped: boolean
-  thought: string
   tokensUsed: number
-}
-
-export function BatchProgressCard({ batch }: { batch: ActiveBatch }) {
-  const done  = batch.total > 0 ? batch.processed + batch.failed + batch.skipped : 0
-  const pct   = batch.total > 0 ? Math.round((done / batch.total) * 100) : 0
-  const label = batch.done
-    ? batch.stopped ? "Batch stopped" : "Batch complete"
-    : `Analysing — ${batch.siteName || "site"}`
-
-  return (
-    <div className={`rounded-lg border px-3 py-2.5 text-xs ${
-      batch.done
-        ? batch.stopped ? "border-zinc-200 bg-zinc-50" : "border-emerald-200 bg-emerald-50"
-        : "border-blue-200 bg-blue-50"
-    }`}>
-      <div className="mb-2 flex items-center gap-1.5">
-        <span className="shrink-0 select-none">
-          {batch.done ? (batch.stopped ? "⏹" : "✅") : "🔄"}
-        </span>
-        <span className={`font-semibold ${
-          batch.done ? (batch.stopped ? "text-zinc-600" : "text-emerald-900") : "text-blue-900"
-        }`}>{label}</span>
-        {!batch.done && (
-          <span className="ml-auto font-mono text-[10px] text-blue-600">{pct}%</span>
-        )}
-      </div>
-
-      <div className="mb-1.5 h-1.5 overflow-hidden rounded-full bg-white/70">
-        <div
-          className={`h-full rounded-full transition-all duration-500 ${
-            batch.done ? (batch.stopped ? "bg-zinc-400" : "bg-emerald-500") : "bg-blue-500"
-          }`}
-          style={{ width: `${pct}%` }}
-        />
-      </div>
-
-      <div className="flex flex-wrap gap-x-2.5 gap-y-0.5 text-[10px]">
-        <span className="text-emerald-700">{batch.processed} done</span>
-        {batch.failed  > 0 && <span className="text-red-600">{batch.failed} failed</span>}
-        {batch.skipped > 0 && <span className="text-zinc-400">{batch.skipped} skipped</span>}
-        <span className="text-zinc-400">of {batch.total}</span>
-        {batch.tokensUsed > 0 && (
-          <span className="ml-auto text-zinc-400">
-            {batch.tokensUsed >= 1_000_000
-              ? `${(batch.tokensUsed / 1_000_000).toFixed(1)}M`
-              : batch.tokensUsed >= 1000
-              ? `${Math.round(batch.tokensUsed / 1000)}k`
-              : batch.tokensUsed} tok
-          </span>
-        )}
-      </div>
-
-      {!batch.done && batch.thought && (
-        <p className="mt-1.5 text-[10px] italic leading-snug text-blue-700">
-          {batch.thought}
-        </p>
-      )}
-    </div>
-  )
+  events: BatchBuildingEvent[]
+  currentOsmId: number | null
+  currentStage: string
+  currentThought: string
 }
 
 const TOOL_ICONS: Record<string, string> = {

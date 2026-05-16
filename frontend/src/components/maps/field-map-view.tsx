@@ -3917,8 +3917,16 @@ export function FieldMapView() {
           skipped: batchProgress.skipped,
           done: batchDone,
           stopped: batchWasStopped,
-          thought: currentAiStage?.thought ?? "",
           tokensUsed: batchTokensUsed,
+          events: batchProgress.events.map((e) => ({
+            osm_id: e.osm_id,
+            status: e.status as "done" | "skipped" | "failed",
+            severity: e.severity,
+            error: e.error,
+          })),
+          currentOsmId: currentAiStage?.osm_id ?? null,
+          currentStage: currentAiStage?.stage ?? "",
+          currentThought: currentThinkingFull || currentAiStage?.thought || "",
         } : null}
       />
 
