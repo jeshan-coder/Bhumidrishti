@@ -39,6 +39,7 @@ type StreamCallbacks = {
   onProgress: (message: string) => void
   onThinking: (text: string) => void
   onToken: (token: string) => void
+  onSection: (html: string) => void
   onToolCall: (toolName: string, args: Record<string, unknown>) => void
   onToolResult: (toolName: string, result: Record<string, unknown>) => void
   onDone: (payload: { report_id: string; status: string; download_url: string }) => void
@@ -68,7 +69,8 @@ function parseStreamEvent(rawEvent: string): { event: string; data: unknown } | 
 
 export async function streamReportGeneration(
   payload: ReportGenerateRequest,
-  callbacks: StreamCallbacks
+  callbacks: StreamCallbacks,
+  signal?: AbortSignal
 ): Promise<void> {
   const response = await fetch(`${API_BASE}/reports/stream`, {
     method: "POST",
@@ -77,6 +79,7 @@ export async function streamReportGeneration(
       Accept: "text/event-stream",
     },
     body: JSON.stringify(payload),
+    signal,
   })
   if (!response.ok) {
     throw new Error(`Report stream failed with status ${response.status}`)
@@ -120,6 +123,12 @@ export async function streamReportGeneration(
         continue
       }
 
+      if (parsed.event === "section" && typeof parsed.data === "object" && parsed.data !== null) {
+        const html = (parsed.data as { html?: unknown }).html
+        if (typeof html === "string") callbacks.onSection(html)
+        continue
+      }
+
       if (parsed.event === "tool_call" && typeof parsed.data === "object" && parsed.data !== null) {
         const name = (parsed.data as { name?: unknown }).name
         const rawArgs = (parsed.data as { arguments?: unknown }).arguments
@@ -159,7 +168,7 @@ export async function streamReportGeneration(
     }
   }
 
-  if (!doneReceived) {
+  if (!doneReceived && !(signal?.aborted)) {
     throw new Error("Stream closed before done event")
   }
 }

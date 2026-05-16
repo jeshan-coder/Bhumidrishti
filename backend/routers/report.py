@@ -17,8 +17,8 @@ from models.report import ReportGenerateRequest
 from services.reporting import (
     REPORTS_DIR,
     create_report_record,
-    generate_building_markdown,
     generate_site_markdown,
+    generate_site_report_v2,
     save_pdf_report,
     save_markdown_report,
     update_report_record,
@@ -56,8 +56,11 @@ def _resolve_report_path(file_path_value: str | None, report_id: str) -> Path:
             if candidate.exists():
                 return candidate
 
-    fallback = REPORTS_DIR / f"{report_id}.md"
-    return fallback
+    # Prefer PDF for the download endpoint; fall back gracefully to markdown if only that exists.
+    pdf_fallback = REPORTS_DIR / f"{report_id}.pdf"
+    if pdf_fallback.exists():
+        return pdf_fallback
+    return REPORTS_DIR / f"{report_id}.md"
 
 
 @router.post("/stream")
@@ -127,32 +130,25 @@ async def generate_report_stream(payload: ReportGenerateRequest) -> StreamingRes
             await queue.put(("tool_result", {"name": name, "result": result, "report_id": report_id}))
             await asyncio.sleep(0)
 
+        async def on_section(html: str) -> None:
+            await queue.put(("section", {"html": html, "report_id": report_id}))
+            await asyncio.sleep(0)
+
         async def run_generation() -> None:
             try:
                 await on_progress("Report generation started...")
 
-                if payload.report_type == "site":
-                    markdown_text = await generate_site_markdown(
-                        pool=pool,
-                        request=payload,
-                        report_id=report_id,
-                        on_progress=on_progress,
-                        on_token=on_token,
-                        on_thinking=on_thinking,
-                        on_tool_call=on_tool_call,
-                        on_tool_result=on_tool_result,
-                    )
-                else:
-                    markdown_text = await generate_building_markdown(
-                        pool=pool,
-                        request=payload,
-                        report_id=report_id,
-                        on_progress=on_progress,
-                        on_token=on_token,
-                        on_thinking=on_thinking,
-                        on_tool_call=on_tool_call,
-                        on_tool_result=on_tool_result,
-                    )
+                markdown_text = await generate_site_report_v2(
+                    pool=pool,
+                    request=payload,
+                    report_id=report_id,
+                    on_progress=on_progress,
+                    on_token=on_token,
+                    on_thinking=on_thinking,
+                    on_tool_call=on_tool_call,
+                    on_tool_result=on_tool_result,
+                    on_section=on_section,
+                )
 
                 if not markdown_text.strip():
                     markdown_text = "".join(report_markdown_parts).strip()
@@ -215,7 +211,7 @@ async def list_reports(limit: int = 100) -> dict[str, Any]:
                 """
                 SELECT
                     id, report_type, site_id, assessment_id, team_name, language,
-                    file_path, status, created_by, created_at
+                    file_path, status, created_by, created_at, error_message
                 FROM reports
                 ORDER BY created_at DESC
                 LIMIT $1
@@ -234,6 +230,7 @@ async def list_reports(limit: int = 100) -> dict[str, Any]:
                 "status": row["status"],
                 "created_by": row["created_by"],
                 "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                "error_message": row["error_message"],
             }
             for row in rows
         ]

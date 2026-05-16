@@ -10,3 +10,6 @@ httpx
 opencv-python-headless
 fpdf2
 staticmap
+weasyprint
+matplotlib
+markdown

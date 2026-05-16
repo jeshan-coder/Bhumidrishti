@@ -332,27 +332,40 @@ async def _lookup_ground_data_for_building(
     """
     async with pool.acquire() as conn:
         # Source 1: existing assessments (analysed ground data).
+        # Match by exact osm_building_id OR by the photo's own lat/lon being near this
+        # building — and only if this building is the NEAREST building to the photo.
+        # Using the photo lat/lon (not the assessment's geom polygon) prevents a photo
+        # from being claimed by neighbouring buildings whose footprint polygon happens to
+        # fall within the search radius.
         assessed_rows = await conn.fetch(
             """
             SELECT input_type, photo_path
-              FROM assessments
+              FROM assessments a
              WHERE (
-                     osm_building_id = $1
+                     a.osm_building_id = $1
                      OR (
-                         geom IS NOT NULL
+                         a.lat IS NOT NULL
+                         AND a.lon IS NOT NULL
                          AND ST_DWithin(
-                             geom::geography,
+                             ST_SetSRID(ST_MakePoint(a.lon, a.lat), 4326)::geography,
                              ST_SetSRID(ST_MakePoint($2, $3), 4326)::geography,
                              $4
                          )
+                         AND (
+                             SELECT tb.osm_id
+                               FROM turkey_buildings tb
+                              ORDER BY tb.geom::geography
+                                    <-> ST_SetSRID(ST_MakePoint(a.lon, a.lat), 4326)::geography
+                              LIMIT 1
+                         ) = $1
                      )
                    )
-               AND input_type IN ('ground_photo', 'video')
-               AND status NOT IN ('false_positive')
-               AND photo_path IS NOT NULL
+               AND a.input_type IN ('ground_photo', 'video')
+               AND a.status NOT IN ('false_positive')
+               AND a.photo_path IS NOT NULL
              ORDER BY
-                 CASE WHEN input_type = 'ground_photo' THEN 1 ELSE 2 END,
-                 created_at DESC
+                 CASE WHEN a.input_type = 'ground_photo' THEN 1 ELSE 2 END,
+                 a.created_at DESC
             """,
             osm_id,
             centroid_lon,
@@ -361,28 +374,38 @@ async def _lookup_ground_data_for_building(
         )
 
         # Source 2: raw uploads not yet analysed (is_analyzed = false).
+        # Only claim an upload if this building is the nearest building to the upload
+        # GPS point — prevents the same photo/video from appearing in adjacent buildings.
         upload_rows = await conn.fetch(
             """
             SELECT
-                file_type AS input_type,
-                saved_path AS photo_path
-            FROM uploads
-            WHERE file_type IN ('ground_photo', 'video')
-              AND is_analyzed = false
-              AND lat IS NOT NULL
-              AND lon IS NOT NULL
+                u.file_type AS input_type,
+                u.saved_path AS photo_path
+            FROM uploads u
+            WHERE u.file_type IN ('ground_photo', 'video')
+              AND u.is_analyzed = false
+              AND u.lat IS NOT NULL
+              AND u.lon IS NOT NULL
               AND ST_DWithin(
-                  ST_SetSRID(ST_MakePoint(lon, lat), 4326)::geography,
+                  ST_SetSRID(ST_MakePoint(u.lon, u.lat), 4326)::geography,
                   ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography,
                   $3
               )
+              AND (
+                  SELECT tb.osm_id
+                    FROM turkey_buildings tb
+                   ORDER BY tb.geom::geography
+                         <-> ST_SetSRID(ST_MakePoint(u.lon, u.lat), 4326)::geography
+                   LIMIT 1
+              ) = $4
             ORDER BY
-                CASE WHEN file_type = 'ground_photo' THEN 1 ELSE 2 END,
-                uploaded_at DESC
+                CASE WHEN u.file_type = 'ground_photo' THEN 1 ELSE 2 END,
+                u.uploaded_at DESC
             """,
             centroid_lon,
             centroid_lat,
             radius_m,
+            osm_id,
         )
 
     # Merge: assessed data takes precedence over raw uploads.

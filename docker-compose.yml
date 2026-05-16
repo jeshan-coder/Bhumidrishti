@@ -86,6 +86,16 @@ services:
     ports:
       - "5000:5000"
 
+  tileserver:
+    image: maptiler/tileserver-gl:latest
+    container_name: bhumidrishti_tileserver
+    volumes:
+      - ./data/tiles_data:/data
+    command: ["--config", "/data/config.json", "--port", "8080"]
+    ports:
+      - "8090:8080"
+    restart: unless-stopped
+
   backend:
     build:
       context: ./backend
@@ -99,6 +109,8 @@ services:
       - ./uploads:/app/data/uploads
     env_file:
       - ./backend/.env
+    environment:
+      - TILE_SERVER_URL=http://tileserver:8080/styles/basic/{z}/{x}/{y}.png
     depends_on:
       postgres:
         condition: service_healthy
@@ -109,6 +121,8 @@ services:
       titiler:
         condition: service_started
       osrm:
+        condition: service_started
+      tileserver:
         condition: service_started
 
   gis-loader:

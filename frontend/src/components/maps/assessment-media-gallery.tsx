@@ -1,7 +1,7 @@
 "use client"
 
 // This variable holds the backend base URL used to build absolute media links.
-const BACKEND_PUBLIC_URL = "http://localhost:8000"
+const BACKEND_PUBLIC_URL = (process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000").replace(/\/$/, "")
 
 // This function converts a backend-relative media path to a full URL.
 function toMediaUrl(rawPath: unknown): string | null {
@@ -51,11 +51,17 @@ type AssessmentMediaGalleryProps = {
 export function AssessmentMediaGallery({ properties }: AssessmentMediaGalleryProps) {
   const preChipUrl = toMediaUrl(properties.pre_chip_path)
   const postChipUrl = toMediaUrl(properties.chip_path)
-  const photoUrl = toMediaUrl(properties.photo_path)
-  const videoUrl = toMediaUrl(properties.video_path)
   const droneFrameUrls = parseDroneFrames(properties.drone_frames)
     .map(toMediaUrl)
     .filter((url): url is string => Boolean(url))
+
+  // When input_type is "video", the video file path is stored in photo_path (video_path
+  // is always NULL in the DB). Route accordingly so the player gets the real URL.
+  const isVideoInput = String(properties.input_type ?? "") === "video"
+  const photoUrl     = isVideoInput ? null : toMediaUrl(properties.photo_path)
+  const videoUrl     = isVideoInput
+    ? toMediaUrl(properties.photo_path)
+    : toMediaUrl(properties.video_path)
 
   // Avoid showing the same image twice when the ground photo equals chip_path.
   const photoDistinctFromPost = photoUrl && photoUrl !== postChipUrl ? photoUrl : null

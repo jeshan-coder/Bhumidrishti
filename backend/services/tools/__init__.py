@@ -14,15 +14,13 @@ Package structure (one file per tool implementation):
     get_field_workers.py        — backward-compat alias
     dispatch_assessments.py     — assign assessments to a team
     update_assessment_status.py — mark assessments responded/closed
-    get_building_report_data.py — single building data fetcher
-    get_building_route.py       — OSRM route between coordinates
+    get_building_route.py       — OSRM route between coordinates (chat/map use)
 
 Tool schema subsets exported:
     ASSESSMENT_TOOLS    — GIS / spatial lookups
     COORDINATION_TOOLS  — coordinator queries: assessments, sites, teams, dispatch
-    REPORT_TOOLS        — report-specific data fetchers
     CHAT_TOOLS          — ASSESSMENT_TOOLS + COORDINATION_TOOLS
-    ALL_TOOLS           — every tool (report agent)
+    ALL_TOOLS           — alias for CHAT_TOOLS (report agent no longer uses tools)
 """
 
 from __future__ import annotations
@@ -504,64 +502,11 @@ COORDINATION_TOOLS: list[dict] = [
 ]
 
 # ---------------------------------------------------------------------------
-# REPORT TOOLS — data fetchers used only by the report-generation agent
-# ---------------------------------------------------------------------------
-
-REPORT_TOOLS: list[dict] = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_building_report_data",
-            "description": (
-                "Get one building's full assessment record by assessment_id. "
-                "Call this FIRST when generating a building report. "
-                "Returns all assessment fields including photos, reasoning, and warnings."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "assessment_id": {
-                        "type": "string",
-                        "description": "Assessment id (e.g. ASS-2847)",
-                    },
-                },
-                "required": ["assessment_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_building_route",
-            "description": (
-                "Get step-by-step OSRM driving or walking route between two GPS coordinates. "
-                "Use for inter-building routes and building-to-shelter evacuation routes. "
-                "Returns distance_m, duration_s, and a list of turn-by-turn step strings."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "from_lat": {"type": "number", "description": "Origin latitude WGS84"},
-                    "from_lon": {"type": "number", "description": "Origin longitude WGS84"},
-                    "to_lat": {"type": "number", "description": "Destination latitude WGS84"},
-                    "to_lon": {"type": "number", "description": "Destination longitude WGS84"},
-                    "profile": {
-                        "type": "string",
-                        "description": "Routing profile: driving (default) or foot",
-                    },
-                },
-                "required": ["from_lat", "from_lon", "to_lat", "to_lon"],
-            },
-        },
-    },
-]
-
-# ---------------------------------------------------------------------------
 # COMPOSED SUBSETS
 # ---------------------------------------------------------------------------
 
 CHAT_TOOLS: list[dict] = [*ASSESSMENT_TOOLS, *COORDINATION_TOOLS]
-ALL_TOOLS: list[dict] = [*ASSESSMENT_TOOLS, *COORDINATION_TOOLS, *REPORT_TOOLS]
+ALL_TOOLS: list[dict] = CHAT_TOOLS  # report agent no longer calls tools
 
 ASSESSMENT_TOOL_NAMES: frozenset[str] = frozenset(
     t["function"]["name"] for t in ASSESSMENT_TOOLS
@@ -569,12 +514,8 @@ ASSESSMENT_TOOL_NAMES: frozenset[str] = frozenset(
 COORDINATION_TOOL_NAMES: frozenset[str] = frozenset(
     t["function"]["name"] for t in COORDINATION_TOOLS
 )
-REPORT_TOOL_NAMES: frozenset[str] = frozenset(
-    t["function"]["name"] for t in REPORT_TOOLS
-)
-ALL_TOOL_NAMES: frozenset[str] = (
-    ASSESSMENT_TOOL_NAMES | COORDINATION_TOOL_NAMES | REPORT_TOOL_NAMES
-)
+REPORT_TOOL_NAMES: frozenset[str] = frozenset()  # removed — report agent uses data-in-prompt
+ALL_TOOL_NAMES: frozenset[str] = ASSESSMENT_TOOL_NAMES | COORDINATION_TOOL_NAMES
 
 _logger = _logging.getLogger(__name__)
 
@@ -738,17 +679,8 @@ async def dispatch_tool(
 
     _logger.info("tools.dispatch tool=%s args=%s", tool_name, tool_args)
 
-    # ---- Report-specific tools ----------------------------------------
-    if tool_name in REPORT_TOOL_NAMES:
-        if tool_name == "get_building_report_data":
-            from services.tools.get_building_report_data import get_building_report_data  # noqa: PLC0415
-            result = await get_building_report_data(tool_args, db)
-        else:  # get_building_route
-            from services.tools.get_building_route import get_building_route  # noqa: PLC0415
-            result = await get_building_route(tool_args, db)
-
     # ---- GIS / spatial tools ------------------------------------------
-    elif tool_name in ASSESSMENT_TOOL_NAMES:
+    if tool_name in ASSESSMENT_TOOL_NAMES:
         lat = tool_args.get("lat")
         lon = tool_args.get("lon")
         if tool_name == "get_building_info":
