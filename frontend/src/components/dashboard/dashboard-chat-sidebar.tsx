@@ -5,201 +5,207 @@ import type { ComponentPropsWithoutRef } from "react"
 import { MessageSquare, Pencil, RotateCcw, X } from "lucide-react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
-import { streamChatRequest, type ChatMessagePayload } from "@/lib/api/chat"
+import { streamChatRequest } from "@/lib/api/chat"
 import { ThinkingBubble } from "@/components/chat/thinking-bubble"
+import { ToolCallCard, toolResultSummary, type ToolCallStatus } from "@/components/chat/tool-call-card"
 
-type UiChatMessage = {
-  role: "user" | "assistant"
-  content: string
+// ── Message types ──────────────────────────────────────────────────────────
+
+type UserMsg      = { kind: "user";      id: string; content: string }
+type AssistantMsg = { kind: "assistant"; id: string; content: string }
+type ToolMsg      = {
+  kind: "tool"
+  id: string
+  toolName: string
+  args: Record<string, unknown>
+  status: ToolCallStatus
+  summary: string
+}
+type UiMsg = UserMsg | AssistantMsg | ToolMsg
+
+let _seq = 0
+const uid = () => `m${++_seq}`
+
+function parseThink(raw: string): { thinking: string; answer: string; done: boolean } {
+  const si = raw.indexOf("<think>")
+  if (si === -1) return { thinking: "", answer: raw, done: true }
+  const after = raw.slice(si + 7)
+  const ei = after.indexOf("</think>")
+  if (ei === -1) return { thinking: after, answer: "", done: false }
+  return { thinking: after.slice(0, ei), answer: after.slice(ei + 8), done: true }
 }
 
-type ParsedModelStream = {
-  thinking: string
-  answer: string
-  hasExplicitThinking: boolean
-  thinkingCompleted: boolean
-}
-
-function parseModelStream(rawText: string): ParsedModelStream {
-  const startTag = "<think>"
-  const endTag = "</think>"
-  const thinkStartIndex = rawText.indexOf(startTag)
-  if (thinkStartIndex === -1) {
-    return {
-      thinking: "",
-      answer: rawText,
-      hasExplicitThinking: false,
-      thinkingCompleted: true,
-    }
-  }
-  const contentAfterStart = rawText.slice(thinkStartIndex + startTag.length)
-  const thinkEndIndex = contentAfterStart.indexOf(endTag)
-  if (thinkEndIndex === -1) {
-    return {
-      thinking: contentAfterStart,
-      answer: "",
-      hasExplicitThinking: true,
-      thinkingCompleted: false,
-    }
-  }
-  return {
-    thinking: contentAfterStart.slice(0, thinkEndIndex),
-    answer: contentAfterStart.slice(thinkEndIndex + endTag.length),
-    hasExplicitThinking: true,
-    thinkingCompleted: true,
-  }
-}
+// ── Props ──────────────────────────────────────────────────────────────────
 
 type DashboardChatSidebarProps = {
   isOpen: boolean
   onOpenChange: (open: boolean) => void
 }
 
-const DASHBOARD_CHAT_SYSTEM_PROMPT =
+const SYSTEM_PROMPT =
   "You are BhumiDrishti dashboard coordinator assistant. Use tools for factual coordination actions. " +
   "For dispatch requests: first check available teams using get_field_teams, do not dispatch to busy teams, " +
   "use dispatch_assessments to assign and set responded, and use update_assessment_status for closed."
 
+// ── Component ──────────────────────────────────────────────────────────────
+
 export function DashboardChatSidebar({ isOpen, onOpenChange }: DashboardChatSidebarProps) {
-  const [messages, setMessages] = useState<UiChatMessage[]>([])
-  const [draftMessage, setDraftMessage] = useState("")
-  const [isSending, setIsSending] = useState(false)
-  const [thinkingText, setThinkingText] = useState("")
-  const [editingUserMessageIndex, setEditingUserMessageIndex] = useState<number | null>(null)
-  const activeStreamAbortControllerRef = useRef<AbortController | null>(null)
+  const [msgs, setMsgs]           = useState<UiMsg[]>([])
+  const [draft, setDraft]         = useState("")
+  const [sending, setSending]     = useState(false)
+  const [modelThinking, setModelThinking]   = useState("")
+  const [thinkingStatus, setThinkingStatus] = useState("")
+  const [thinkingKey, setThinkingKey]       = useState(0)
+  const [editIdx, setEditIdx]     = useState<number | null>(null)
+  const abortRef = useRef<AbortController | null>(null)
 
-  const isAbortError = (error: unknown): boolean => {
-    if (error instanceof DOMException) return error.name === "AbortError"
-    return error instanceof Error && error.name === "AbortError"
+  const handleStop = () => {
+    abortRef.current?.abort()
+    setModelThinking("")
+    setThinkingStatus("")
+    setSending(false)
   }
 
-  const handleStopStreaming = () => {
-    activeStreamAbortControllerRef.current?.abort()
-    setThinkingText("")
-    setIsSending(false)
-  }
+  const chatPayload = (history: UiMsg[]) => [
+    { role: "system" as const, content: SYSTEM_PROMPT },
+    ...history
+      .filter((m): m is UserMsg | AssistantMsg => m.kind === "user" || m.kind === "assistant")
+      .map((m) => ({ role: m.kind as "user" | "assistant", content: m.content })),
+  ]
 
-  const streamAssistantResponse = async (nextMessages: UiChatMessage[]) => {
-    const streamAbortController = new AbortController()
-    activeStreamAbortControllerRef.current = streamAbortController
-    setMessages([...nextMessages, { role: "assistant", content: "" }])
-    setDraftMessage("")
-    setIsSending(true)
-    setThinkingText("Gemma4 is thinking...")
+  const stream = async (history: UiMsg[]) => {
+    const ctrl = new AbortController()
+    abortRef.current = ctrl
+    const assistantId = uid()
+    setMsgs([...history, { kind: "assistant", id: assistantId, content: "" }])
+    setDraft("")
+    setSending(true)
+    setModelThinking("")
+    setThinkingStatus("")
+    setThinkingKey((k) => k + 1)
+
+    let raw = ""
+    let lastToolId: string | null = null
 
     try {
-      const chatPayload: ChatMessagePayload[] = [
-        { role: "system", content: DASHBOARD_CHAT_SYSTEM_PROMPT },
-        ...nextMessages.map((message) => ({
-          role: message.role,
-          content: message.content,
-        })),
-      ]
-
-      let assistantReplyRaw = ""
       await streamChatRequest(
-        chatPayload,
+        chatPayload(history),
         {
-          onThinking: (text) => setThinkingText(text),
+          onThinkingStatus: (text) => setThinkingStatus(text),
+          onThinkingModel:  (text) => setModelThinking(text),
+
           onToolCall: (toolName, args) => {
-            const argsPreview = Object.keys(args).length > 0 ? ` ${JSON.stringify(args)}` : ""
-            setThinkingText(`Calling tool: ${toolName}${argsPreview}`)
+            const toolId = uid()
+            lastToolId = toolId
+            setMsgs((prev) => [
+              ...prev,
+              { kind: "tool", id: toolId, toolName, args, status: "running", summary: "running…" },
+            ])
           },
+
+          onToolResult: (toolName, result) => {
+            const { summary, status } = toolResultSummary(toolName, result)
+            setMsgs((prev) =>
+              prev.map((m) =>
+                m.kind === "tool" && m.id === lastToolId
+                  ? { ...m, status, summary }
+                  : m
+              )
+            )
+            lastToolId = null
+          },
+
           onToken: (token) => {
-            assistantReplyRaw += token
-            const parsed = parseModelStream(assistantReplyRaw)
-            setMessages((currentMessages) => {
-              const updated = [...currentMessages]
-              const lastIndex = updated.length - 1
-              if (lastIndex >= 0 && updated[lastIndex].role === "assistant") {
-                if (parsed.hasExplicitThinking && !parsed.thinkingCompleted) {
-                  setThinkingText(parsed.thinking.trim() || "Gemma4 is thinking...")
-                } else {
-                  const assistantAnswer = parsed.answer.trimStart()
-                  setThinkingText("")
-                  updated[lastIndex] = { ...updated[lastIndex], content: assistantAnswer }
-                }
-              }
-              return updated
-            })
+            raw += token
+            const { thinking, answer, done } = parseThink(raw)
+            setMsgs((prev) =>
+              prev.map((m) =>
+                m.kind === "assistant" && m.id === assistantId
+                  ? { ...m, content: answer.trimStart() }
+                  : m
+              )
+            )
+            if (!done) setModelThinking(thinking.trim())
+            else { setModelThinking(""); setThinkingStatus("") }
           },
+
           onDone: () => {
-            const parsed = parseModelStream(assistantReplyRaw)
-            setThinkingText("")
-            if (!parsed.answer.trim()) {
-              setMessages((currentMessages) => {
-                const updated = [...currentMessages]
-                const lastIndex = updated.length - 1
-                if (lastIndex >= 0 && updated[lastIndex].role === "assistant") {
-                  updated[lastIndex] = { ...updated[lastIndex], content: "No response from model." }
-                }
-                return updated
-              })
+            setModelThinking("")
+            setThinkingStatus("")
+            const { answer } = parseThink(raw)
+            if (!answer.trim()) {
+              setMsgs((prev) =>
+                prev.map((m) =>
+                  m.kind === "assistant" && m.id === assistantId
+                    ? { ...m, content: "No response from model." }
+                    : m
+                )
+              )
             }
           },
         },
-        { signal: streamAbortController.signal }
+        { signal: ctrl.signal }
       )
-    } catch (error) {
-      if (isAbortError(error)) {
-        setMessages((currentMessages) => {
-          const updated = [...currentMessages]
-          const lastIndex = updated.length - 1
-          if (lastIndex >= 0 && updated[lastIndex].role === "assistant" && !updated[lastIndex].content.trim()) {
-            updated[lastIndex] = { ...updated[lastIndex], content: "Response stopped." }
-          }
-          return updated
-        })
-        return
+    } catch (err) {
+      const aborted = err instanceof DOMException && err.name === "AbortError"
+      if (aborted) {
+        setMsgs((prev) =>
+          prev.map((m) =>
+            m.kind === "assistant" && m.id === assistantId && !m.content.trim()
+              ? { ...m, content: "Response stopped." }
+              : m
+          )
+        )
+      } else {
+        const msg = err instanceof Error ? err.message : "Failed to contact AI"
+        setMsgs((prev) => [
+          ...prev.filter((m) => !(m.kind === "assistant" && m.id === assistantId)),
+          { kind: "assistant", id: uid(), content: `Error: ${msg}` },
+        ])
       }
-      const message = error instanceof Error ? error.message : "Failed to contact AI endpoint"
-      setMessages((currentMessages) => [
-        ...currentMessages.filter(
-          (chatMessage, index, array) => !(index === array.length - 1 && chatMessage.role === "assistant")
-        ),
-        { role: "assistant", content: `Error: ${message}` },
-      ])
     } finally {
-      if (activeStreamAbortControllerRef.current === streamAbortController) {
-        activeStreamAbortControllerRef.current = null
-      }
-      setThinkingText("")
-      setIsSending(false)
+      if (abortRef.current === ctrl) abortRef.current = null
+      setSending(false)
+      setModelThinking("")
+      setThinkingStatus("")
     }
   }
 
-  const handleSendMessage = async () => {
-    const trimmed = draftMessage.trim()
-    if (!trimmed || isSending) return
-    const nextUserMessage: UiChatMessage = { role: "user", content: trimmed }
-    if (editingUserMessageIndex !== null) {
-      const conversationBeforeEdit = messages.slice(0, editingUserMessageIndex)
-      setEditingUserMessageIndex(null)
-      await streamAssistantResponse([...conversationBeforeEdit, nextUserMessage])
+  const send = async () => {
+    const text = draft.trim()
+    if (!text || sending) return
+    const userMsg: UiMsg = { kind: "user", id: uid(), content: text }
+    if (editIdx !== null) {
+      const before = msgs.filter((m): m is UserMsg | AssistantMsg => m.kind === "user" || m.kind === "assistant").slice(0, editIdx)
+      setEditIdx(null)
+      await stream([...before, userMsg])
       return
     }
-    await streamAssistantResponse([...messages, nextUserMessage])
+    await stream([...msgs, userMsg])
   }
 
-  const handleRetryMessage = async (userMessageIndex: number) => {
-    if (isSending) return
-    const selectedMessage = messages[userMessageIndex]
-    if (!selectedMessage || selectedMessage.role !== "user") return
-    const conversationBeforeRetry = messages.slice(0, userMessageIndex)
-    await streamAssistantResponse([...conversationBeforeRetry, selectedMessage])
+  const retry = async (msgId: string) => {
+    if (sending) return
+    const idx = msgs.findIndex((m) => m.id === msgId && m.kind === "user")
+    if (idx === -1) return
+    const before = msgs.slice(0, idx).filter((m): m is UserMsg | AssistantMsg => m.kind === "user" || m.kind === "assistant")
+    await stream([...before, msgs[idx] as UserMsg])
   }
 
-  const handleEditMessage = (userMessageIndex: number) => {
-    if (isSending) return
-    const selectedMessage = messages[userMessageIndex]
-    if (!selectedMessage || selectedMessage.role !== "user") return
-    setEditingUserMessageIndex(userMessageIndex)
-    setDraftMessage(selectedMessage.content)
+  const edit = (msgId: string, idx: number) => {
+    if (sending) return
+    const m = msgs.find((m) => m.id === msgId)
+    if (!m || m.kind !== "user") return
+    setEditIdx(idx)
+    setDraft(m.content)
   }
+
+  // Count only user messages for thinkingKey reset
+  const userCount = msgs.filter((m) => m.kind === "user").length
 
   return (
     <>
-      {!isOpen ? (
+      {!isOpen && (
         <button
           type="button"
           onClick={() => onOpenChange(true)}
@@ -209,125 +215,141 @@ export function DashboardChatSidebar({ isOpen, onOpenChange }: DashboardChatSide
           <MessageSquare size={15} />
           Chat
         </button>
-      ) : null}
+      )}
 
-      {isOpen ? (
+      {isOpen && (
         <aside className="fixed right-0 top-[49px] z-40 flex h-[calc(100dvh-49px)] w-full max-w-sm flex-col border-l border-[#D3D1C7] bg-[#FAFAF8] shadow-xl">
+          {/* Header */}
           <div className="flex items-center justify-between border-b border-[#D3D1C7] px-4 py-3">
             <h2 className="text-sm font-semibold text-[#085041]">Gemma4 Assistant</h2>
             <button
               type="button"
               onClick={() => onOpenChange(false)}
-              className="rounded-md px-2 py-1 text-xs font-medium text-[#085041] hover:bg-[#E1F5EE]"
+              className="rounded-md p-1 text-[#085041] hover:bg-[#E1F5EE]"
             >
               <X size={14} />
             </button>
           </div>
 
+          {/* Message list */}
           <div className="flex-1 space-y-2 overflow-y-auto p-4">
-            {messages.length === 0 ? (
+            {msgs.length === 0 && (
               <p className="text-xs text-[#5a6b65]">Ask about triage priorities, dispatch, or close actions.</p>
-            ) : null}
+            )}
 
-            {messages.map((message, index) => (
-              <div
-                key={`${message.role}-${index}`}
-                hidden={message.role === "assistant" && !message.content.trim()}
-                className={
-                  message.role === "user"
-                    ? "group ml-6 rounded-lg bg-[#0F6E56] px-3 py-2 text-xs text-white"
-                    : "mr-6 rounded-lg bg-[#E1F5EE] px-3 py-2 text-xs text-[#085041]"
-                }
-              >
-                {message.role === "assistant" ? (
-                  <ReactMarkdown
-                    remarkPlugins={[remarkGfm]}
-                    components={{
-                      p: ({ children }: ComponentPropsWithoutRef<"p">) => <p className="mb-2 last:mb-0">{children}</p>,
-                      ul: ({ children }: ComponentPropsWithoutRef<"ul">) => <ul className="mb-2 list-disc space-y-1 pl-4 last:mb-0">{children}</ul>,
-                      ol: ({ children }: ComponentPropsWithoutRef<"ol">) => <ol className="mb-2 list-decimal space-y-1 pl-4 last:mb-0">{children}</ol>,
-                      code: ({ children }: ComponentPropsWithoutRef<"code">) => <code className="rounded bg-[#d8efe8] px-1 py-0.5 font-mono text-[11px]">{children}</code>,
-                      pre: ({ children }: ComponentPropsWithoutRef<"pre">) => <pre className="mb-2 overflow-x-auto rounded bg-[#d8efe8] p-2 text-[11px] last:mb-0">{children}</pre>,
-                    }}
-                  >
-                    {message.content}
-                  </ReactMarkdown>
-                ) : (
-                  <>
-                    <p>{message.content}</p>
-                    {!isSending ? (
+            {msgs.map((msg, idx) => {
+              if (msg.kind === "tool") {
+                return (
+                  <ToolCallCard
+                    key={msg.id}
+                    toolName={msg.toolName}
+                    args={msg.args}
+                    status={msg.status}
+                    summary={msg.summary}
+                  />
+                )
+              }
+
+              if (msg.kind === "user") {
+                return (
+                  <div key={msg.id} className="group ml-6 rounded-lg bg-[#0F6E56] px-3 py-2 text-xs text-white">
+                    <p>{msg.content}</p>
+                    {!sending && (
                       <div className="mt-2 flex justify-end gap-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
                         <button
                           type="button"
-                          onClick={() => void handleRetryMessage(index)}
-                          className="inline-flex h-6 w-6 items-center justify-center rounded border border-white/35 text-white transition-colors hover:bg-white/10"
-                          aria-label="Retry question"
+                          onClick={() => void retry(msg.id)}
+                          className="inline-flex h-6 w-6 items-center justify-center rounded border border-white/35 text-white hover:bg-white/10"
                           title="Retry"
                         >
                           <RotateCcw size={12} />
                         </button>
                         <button
                           type="button"
-                          onClick={() => handleEditMessage(index)}
-                          className="inline-flex h-6 w-6 items-center justify-center rounded border border-white/35 text-white transition-colors hover:bg-white/10"
-                          aria-label="Edit question"
+                          onClick={() => edit(msg.id, idx)}
+                          className="inline-flex h-6 w-6 items-center justify-center rounded border border-white/35 text-white hover:bg-white/10"
                           title="Edit"
                         >
                           <Pencil size={12} />
                         </button>
                       </div>
-                    ) : null}
-                  </>
+                    )}
+                  </div>
+                )
+              }
+
+              // assistant
+              if (!msg.content.trim()) return null
+              return (
+                <div key={msg.id} className="mr-6 rounded-lg bg-[#E1F5EE] px-3 py-2 text-xs text-[#085041]">
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    components={{
+                      p:   ({ children }: ComponentPropsWithoutRef<"p">)   => <p className="mb-2 last:mb-0">{children}</p>,
+                      ul:  ({ children }: ComponentPropsWithoutRef<"ul">)  => <ul className="mb-2 list-disc space-y-1 pl-4 last:mb-0">{children}</ul>,
+                      ol:  ({ children }: ComponentPropsWithoutRef<"ol">)  => <ol className="mb-2 list-decimal space-y-1 pl-4 last:mb-0">{children}</ol>,
+                      code:({ children }: ComponentPropsWithoutRef<"code">)=> <code className="rounded bg-[#d8efe8] px-1 py-0.5 font-mono text-[11px]">{children}</code>,
+                      pre: ({ children }: ComponentPropsWithoutRef<"pre">) => <pre className="mb-2 overflow-x-auto rounded bg-[#d8efe8] p-2 text-[11px] last:mb-0">{children}</pre>,
+                    }}
+                  >
+                    {msg.content}
+                  </ReactMarkdown>
+                </div>
+              )
+            })}
+
+            {/* Live thinking — shown while model is reasoning */}
+            {sending && (modelThinking || thinkingStatus) && (
+              <div className="mr-6 space-y-1.5">
+                {thinkingStatus && (
+                  <p className="flex items-center gap-1.5 text-[10px] font-mono text-[#3A6F61]">
+                    <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-[#0F6E56]" />
+                    {thinkingStatus}
+                  </p>
+                )}
+                {modelThinking && (
+                  <ThinkingBubble text={modelThinking} resetKey={thinkingKey} />
                 )}
               </div>
-            ))}
-
-            {isSending && thinkingText ? (
-              <ThinkingBubble
-                text={thinkingText}
-                resetKey={messages.filter((m) => m.role === "user").length}
-              />
-            ) : null}
+            )}
           </div>
 
+          {/* Input */}
           <div className="border-t border-[#D3D1C7] p-3">
-            {editingUserMessageIndex !== null ? (
+            {editIdx !== null && (
               <p className="mb-2 text-[11px] font-medium text-[#0b5f4b]">Editing selected question…</p>
-            ) : null}
+            )}
             <textarea
-              value={draftMessage}
-              onChange={(event) => setDraftMessage(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault()
-                  void handleSendMessage()
-                }
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void send() }
               }}
-              placeholder="Ask Gemma4..."
+              placeholder="Ask Gemma4…"
               rows={3}
               className="w-full resize-none rounded-md border border-[#D3D1C7] bg-white px-3 py-2 text-xs text-[#1f2d28] outline-none focus:border-[#0F6E56]"
             />
             <div className="mt-2 grid grid-cols-2 gap-2">
               <button
                 type="button"
-                onClick={handleSendMessage}
-                disabled={isSending}
-                className="rounded-md bg-[#0F6E56] px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#085041] disabled:cursor-not-allowed disabled:bg-[#8cb8ad]"
+                onClick={() => void send()}
+                disabled={sending}
+                className="rounded-md bg-[#0F6E56] px-3 py-2 text-xs font-semibold text-white hover:bg-[#085041] disabled:cursor-not-allowed disabled:bg-[#8cb8ad]"
               >
-                {isSending ? "Sending..." : editingUserMessageIndex !== null ? "Save & Send" : "Send"}
+                {sending ? "Sending…" : editIdx !== null ? "Save & Send" : "Send"}
               </button>
               <button
                 type="button"
-                onClick={handleStopStreaming}
-                disabled={!isSending}
-                className="rounded-md border border-[#0F6E56] bg-white px-3 py-2 text-xs font-semibold text-[#0F6E56] transition-colors hover:bg-[#E1F5EE] disabled:cursor-not-allowed disabled:border-[#8cb8ad] disabled:text-[#8cb8ad]"
+                onClick={handleStop}
+                disabled={!sending}
+                className="rounded-md border border-[#0F6E56] bg-white px-3 py-2 text-xs font-semibold text-[#0F6E56] hover:bg-[#E1F5EE] disabled:cursor-not-allowed disabled:border-[#8cb8ad] disabled:text-[#8cb8ad]"
               >
                 Stop
               </button>
             </div>
           </div>
         </aside>
-      ) : null}
+      )}
     </>
   )
 }

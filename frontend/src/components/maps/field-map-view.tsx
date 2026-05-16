@@ -950,6 +950,8 @@ export function FieldMapView() {
         batchStreamCleanupRef.current = null
       }
       setActiveBatchId(bId)
+      setActiveBatchSiteName(batch.site_name || batch.batch_id)
+      setIsChatSidebarOpen(true)
       setBatchProgress({ total: 0, processed: 0, failed: 0, skipped: 0, events: [] })
       setBatchDone(false)
       setBatchWasStopped(false)
@@ -3906,6 +3908,18 @@ export function FieldMapView() {
         onToolResult={handleChatToolResult}
         selectedBuildingContext={selectedBuildingChatContext}
         onClearSelectedBuildingContext={() => setSelectedBuildingChatContext(null)}
+        activeBatch={activeBatchId && batchProgress ? {
+          batchId: activeBatchId,
+          siteName: activeBatchSiteName,
+          total: batchProgress.total,
+          processed: batchProgress.processed,
+          failed: batchProgress.failed,
+          skipped: batchProgress.skipped,
+          done: batchDone,
+          stopped: batchWasStopped,
+          thought: currentAiStage?.thought ?? "",
+          tokensUsed: batchTokensUsed,
+        } : null}
       />
 
       <FeatureInfoSidebar

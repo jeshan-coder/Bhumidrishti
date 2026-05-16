@@ -7,7 +7,8 @@ Package structure (one file per tool implementation):
     get_location_info.py        — province/district resolution
     get_nearest_road.py         — nearest road query
     get_elevation_slope.py      — DEM elevation + slope
-    get_nearest_shelter.py      — nearest shelter with OSRM route
+    get_nearest_shelter.py      — nearest shelter with OSRM route (supports sites)
+    get_centroid.py             — resolve site/building/geometry to lat/lon centroid
     get_assessments.py          — filtered assessment query
     get_sites.py                — site listing with counts
     get_field_teams.py          — field team listing
@@ -150,25 +151,71 @@ ASSESSMENT_TOOLS: list[dict] = [
         "function": {
             "name": "get_nearest_shelter",
             "description": (
-                "Find the nearest shelter or safe facility from a GPS coordinate "
-                "or site reference in the local PostGIS database. "
+                "Find the nearest shelter or emergency facility from a point or site. "
                 "Searches hospitals, clinics, schools, town halls, places of worship, "
-                "police stations, and pharmacies. "
-                "Returns facility name, straight-line distance in metres, type, "
-                "nearest road name, and route geometry."
+                "police stations, and pharmacies. Returns facility name, straight-line "
+                "distance in metres, type, nearest road name, and OSRM driving route. "
+                "IMPORTANT — origin selection: "
+                "• For an individual building or GPS point → pass lat + lon. "
+                "• For an entire named site → pass site_name (e.g. 'Antakya Ward 3') "
+                "  or site_id; the site boundary centroid is used as the origin. "
+                "  Do NOT guess lat/lon for a site — use site_name/site_id instead."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "lat": {"type": "number", "description": "Latitude in decimal degrees WGS84"},
-                    "lon": {"type": "number", "description": "Longitude in decimal degrees WGS84"},
+                    "lat": {
+                        "type": "number",
+                        "description": "Latitude WGS84 — use for a specific building or GPS point, not for a whole site",
+                    },
+                    "lon": {
+                        "type": "number",
+                        "description": "Longitude WGS84 — use for a specific building or GPS point, not for a whole site",
+                    },
                     "site_id": {
                         "type": "integer",
-                        "description": "sites.id — use when asking for shelter for a whole site",
+                        "description": "sites.id primary key — preferred when you know the exact site ID",
                     },
                     "site_name": {
                         "type": "string",
-                        "description": "Site name reference (e.g. 'Antakya Ward 3')",
+                        "description": "Site name as it appears in the database, e.g. 'Antakya Ward 3'. "
+                                       "Matched case-insensitively. Use this when the user refers to a site by name.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_centroid",
+            "description": (
+                "Resolve any named entity or geometry to its centroid lat/lon coordinates. "
+                "Use this as a bridge when another tool only accepts lat/lon but you have a "
+                "site name, site ID, OSM building ID, or raw GeoJSON geometry. "
+                "Call get_centroid first, then pass the returned lat/lon to the target tool. "
+                "Supports: named sites (site_name / site_id), OSM buildings (osm_id), "
+                "and arbitrary GeoJSON geometries (geometry)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "site_id": {
+                        "type": "integer",
+                        "description": "sites.id — resolve centroid of a named disaster site",
+                    },
+                    "site_name": {
+                        "type": "string",
+                        "description": "Site name, e.g. 'Antakya Ward 3'. Matched case-insensitively.",
+                    },
+                    "osm_id": {
+                        "type": "integer",
+                        "description": "OSM building ID — resolve centroid of a specific building polygon",
+                    },
+                    "geometry": {
+                        "type": "object",
+                        "description": "GeoJSON geometry object (Point, Polygon, MultiPolygon, etc.) "
+                                       "whose centroid you want",
                     },
                 },
             },
@@ -705,9 +752,12 @@ async def dispatch_tool(
             from services.tools.get_elevation_slope import get_elevation_slope  # noqa: PLC0415
             loop = _asyncio.get_event_loop()
             result = await loop.run_in_executor(None, get_elevation_slope, lat, lon, None)
-        else:  # get_nearest_shelter
+        elif tool_name == "get_nearest_shelter":
             from services.tools.get_nearest_shelter import get_nearest_shelter  # noqa: PLC0415
             result = await get_nearest_shelter(tool_args, db)
+        else:  # get_centroid
+            from services.tools.get_centroid import get_centroid  # noqa: PLC0415
+            result = await get_centroid(tool_args, db)
 
     # ---- Coordination tools -------------------------------------------
     elif tool_name in COORDINATION_TOOL_NAMES:

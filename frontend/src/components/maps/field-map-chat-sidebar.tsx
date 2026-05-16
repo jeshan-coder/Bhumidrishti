@@ -7,339 +7,230 @@ import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { streamChatRequest } from "@/lib/api/chat"
 import { ThinkingBubble } from "@/components/chat/thinking-bubble"
+import { ToolCallCard, BatchProgressCard, toolResultSummary, type ToolCallStatus, type ActiveBatch } from "@/components/chat/tool-call-card"
 
-// This type defines one chat message rendered in the sidebar.
-type UiChatMessage = {
-  role: "system" | "user" | "assistant"
-  content: string
-  hidden?: boolean
+// ── Message types ──────────────────────────────────────────────────────────
+
+type UserMsg      = { kind: "user";      id: string; content: string; hidden?: boolean }
+type AssistantMsg = { kind: "assistant"; id: string; content: string }
+type ToolMsg      = {
+  kind: "tool"
+  id: string
+  toolName: string
+  args: Record<string, unknown>
+  status: ToolCallStatus
+  summary: string
 }
+type UiMsg = UserMsg | AssistantMsg | ToolMsg
+
+let _seq = 0
+const uid = () => `m${++_seq}`
+
+function parseThink(raw: string): { thinking: string; answer: string; done: boolean } {
+  const si = raw.indexOf("<think>")
+  if (si === -1) return { thinking: "", answer: raw, done: true }
+  const after = raw.slice(si + 7)
+  const ei = after.indexOf("</think>")
+  if (ei === -1) return { thinking: after, answer: "", done: false }
+  return { thinking: after.slice(0, ei), answer: after.slice(ei + 8), done: true }
+}
+
+// ── Props ──────────────────────────────────────────────────────────────────
 
 type SelectedBuildingChatContext = {
   label: string
   geometry: unknown
 }
 
-// This type defines parsed model output split into thinking and final answer parts.
-type ParsedModelStream = {
-  thinking: string
-  answer: string
-  hasExplicitThinking: boolean
-  thinkingCompleted: boolean
-}
-
-// This function parses optional <think>...</think> segments from streamed model text.
-function parseModelStream(rawText: string): ParsedModelStream {
-  const startTag = "<think>"
-  const endTag = "</think>"
-
-  const thinkStartIndex = rawText.indexOf(startTag)
-  if (thinkStartIndex === -1) {
-    return {
-      thinking: "",
-      answer: rawText,
-      hasExplicitThinking: false,
-      thinkingCompleted: true,
-    }
-  }
-
-  const contentAfterStart = rawText.slice(thinkStartIndex + startTag.length)
-  const thinkEndIndex = contentAfterStart.indexOf(endTag)
-
-  if (thinkEndIndex === -1) {
-    return {
-      thinking: contentAfterStart,
-      answer: "",
-      hasExplicitThinking: true,
-      thinkingCompleted: false,
-    }
-  }
-
-  return {
-    thinking: contentAfterStart.slice(0, thinkEndIndex),
-    answer: contentAfterStart.slice(thinkEndIndex + endTag.length),
-    hasExplicitThinking: true,
-    thinkingCompleted: true,
-  }
-}
-
-// This function builds a human-readable label for a tool call event.
-function formatToolCallLabel(toolName: string, args: Record<string, unknown>): string {
-  const lat = typeof args.lat === "number" ? args.lat.toFixed(4) : null
-  const lon = typeof args.lon === "number" ? args.lon.toFixed(4) : null
-  const coords = lat && lon ? ` (${lat}, ${lon})` : ""
-
-  switch (toolName) {
-    case "get_building_info":
-      if (args.osm_id) return `get_building_info → OSM #${args.osm_id}`
-      if (args.province) return `get_building_info → ${args.province}`
-      if (args.geometry) return `get_building_info → selected polygon`
-      return `get_building_info${coords}`
-    case "get_flood_zone":         return `get_flood_zone${coords}`
-    case "get_location_info":      return `get_location_info${coords}`
-    case "get_nearest_road":       return `get_nearest_road${coords}`
-    case "get_elevation_slope":    return `get_elevation_slope${coords}`
-    case "get_nearest_shelter":    return `get_nearest_shelter${coords}`
-    case "get_assessments": {
-      const hints: string[] = []
-      if (args.province)        hints.push(`${args.province}`)
-      if (args.site_name)       hints.push(`site: ${args.site_name}`)
-      if (args.severity != null) hints.push(`sev=${args.severity}`)
-      else if (args.severity_min != null) hints.push(`sev≥${args.severity_min}`)
-      else if (args.severity_max != null) hints.push(`sev≤${args.severity_max}`)
-      if (args.severity_gt != null) hints.push(`sev>${args.severity_gt}`)
-      if (args.severity_lt != null) hints.push(`sev<${args.severity_lt}`)
-      if (args.status)          hints.push(`${args.status}`)
-      if (args.occupant_status) hints.push(`${args.occupant_status}`)
-      if (args.assessment_id)   hints.push(`${args.assessment_id}`)
-      if (args.damage_type)     hints.push(`${args.damage_type}`)
-      if (args.structural_risk) hints.push(`risk:${args.structural_risk}`)
-      return `get_assessments${hints.length ? ` (${hints.join(", ")})` : ""}`
-    }
-    case "get_sites":
-      return `get_sites${args.site_name ? ` → ${args.site_name}` : ""}`
-    case "get_field_teams":
-    case "get_field_workers":
-      return `get_field_teams${args.status ? ` (${args.status})` : ""}`
-    case "dispatch_assessments":
-      return `dispatch_assessments → ${args.team_name ?? args.worker_name ?? "team"}`
-    case "update_assessment_status":
-      return `update_status → ${args.assessment_id ?? "assessments"}: ${args.status}`
-    case "execute_read_query":
-      return `execute_read_query (SQL)`
-    default:
-      return toolName
-  }
-}
-
-// This type defines props for controlled sidebar state.
 type FieldMapChatSidebarProps = {
   isOpen: boolean
   onOpenChange: (open: boolean) => void
   onToolResult?: (toolName: string, result: Record<string, unknown>) => void
   selectedBuildingContext?: SelectedBuildingChatContext | null
   onClearSelectedBuildingContext?: () => void
+  activeBatch?: ActiveBatch | null
 }
 
-// This component renders the field map chat toggle button and chat sidebar.
+// ── Component ──────────────────────────────────────────────────────────────
+
 export function FieldMapChatSidebar({
   isOpen,
   onOpenChange,
   onToolResult,
   selectedBuildingContext,
   onClearSelectedBuildingContext,
+  activeBatch,
 }: FieldMapChatSidebarProps) {
-  // This variable controls sidebar visibility (controlled by parent).
-  const isSidebarOpen = isOpen
-
-  // This variable stores chat history for current map session.
-  const [messages, setMessages] = useState<UiChatMessage[]>([])
-
-  // This variable stores the pending user prompt.
-  const [draftMessage, setDraftMessage] = useState("")
-
-  // This variable tracks active streaming request state.
-  const [isSending, setIsSending] = useState(false)
-
-  // This variable stores the current status label (tool call, iteration progress).
+  const [msgs, setMsgs]                   = useState<UiMsg[]>([])
+  const [draft, setDraft]                 = useState("")
+  const [sending, setSending]             = useState(false)
+  const [modelThinking, setModelThinking] = useState("")
   const [thinkingStatus, setThinkingStatus] = useState("")
+  const [thinkingKey, setThinkingKey]     = useState(0)
+  const [editIdx, setEditIdx]             = useState<number | null>(null)
+  const [copiedId, setCopiedId]           = useState<string | null>(null)
+  const [isExpanded, setIsExpanded]       = useState(false)
+  const abortRef = useRef<AbortController | null>(null)
 
-  // This variable stores the accumulated model reasoning text from <think> SSE tokens.
-  const [modelThinkingText, setModelThinkingText] = useState("")
-
-  // This variable stores an active abort controller for mid-stream cancellation.
-  const activeStreamAbortControllerRef = useRef<AbortController | null>(null)
-
-  // This variable tracks which user message is being edited before resend.
-  const [editingUserMessageIndex, setEditingUserMessageIndex] = useState<number | null>(null)
-
-  // This variable tracks which assistant message was most recently copied (for checkmark flash).
-  const [copiedMessageIndex, setCopiedMessageIndex] = useState<number | null>(null)
-
-  // This variable controls whether the sidebar is in wide expanded mode.
-  const [isExpanded, setIsExpanded] = useState(false)
-
-  // Approximate token count for the current conversation.
-  // 2500 tokens covers the system prompt + tool schemas sent on every request.
-  // Message text is estimated at 4 chars per token (English average).
-  const SYSTEM_PROMPT_TOKEN_ESTIMATE = 2500
-  const MAX_CONTEXT_TOKENS = 256000
-  const estimatedTokens = SYSTEM_PROMPT_TOKEN_ESTIMATE + Math.ceil(
-    messages.reduce((sum, m) => sum + m.content.length, 0) / 4
+  // Token estimate
+  const SYS_TOKENS = 2500
+  const MAX_TOKENS = 256000
+  const estTokens = SYS_TOKENS + Math.ceil(
+    msgs.reduce((s, m) => s + (m.kind !== "tool" ? m.content.length : 0), 0) / 4
   )
-  const tokenPct = (estimatedTokens / MAX_CONTEXT_TOKENS) * 100
+  const tokenPct = (estTokens / MAX_TOKENS) * 100
   const tokenBarColor =
     tokenPct > 80 ? "bg-red-500" :
     tokenPct > 60 ? "bg-orange-400" :
     tokenPct > 30 ? "bg-yellow-400" :
     "bg-[#0F6E56]"
-  const tokenLabel = estimatedTokens >= 1000
-    ? `~${(estimatedTokens / 1000).toFixed(1)}k`
-    : `~${estimatedTokens}`
+  const tokenLabel = estTokens >= 1000 ? `~${(estTokens / 1000).toFixed(1)}k` : `~${estTokens}`
 
-  // This function identifies browser abort errors from cancelled streaming requests.
-  const isAbortError = (error: unknown): boolean => {
-    if (error instanceof DOMException) {
-      return error.name === "AbortError"
-    }
-
-    return error instanceof Error && error.name === "AbortError"
-  }
-
-  // This function aborts the active stream and restores input controls.
-  const handleStopStreaming = () => {
-    activeStreamAbortControllerRef.current?.abort()
+  const handleStop = () => {
+    abortRef.current?.abort()
+    setModelThinking("")
     setThinkingStatus("")
-    setModelThinkingText("")
-    setIsSending(false)
+    setSending(false)
   }
 
-  // This function clears all conversation history, starting a fresh context window.
   const handleNewConversation = () => {
-    activeStreamAbortControllerRef.current?.abort()
-    setMessages([])
-    setDraftMessage("")
+    abortRef.current?.abort()
+    setMsgs([])
+    setDraft("")
+    setModelThinking("")
     setThinkingStatus("")
-    setModelThinkingText("")
-    setIsSending(false)
-    setEditingUserMessageIndex(null)
+    setSending(false)
+    setEditIdx(null)
   }
 
-  // This function starts one streaming response from a prepared chat history.
-  const streamAssistantResponse = async (nextMessages: UiChatMessage[]) => {
-    const streamAbortController = new AbortController()
-    activeStreamAbortControllerRef.current = streamAbortController
+  const chatHistory = (history: UiMsg[]) =>
+    history
+      .filter((m): m is UserMsg | AssistantMsg => m.kind === "user" || m.kind === "assistant")
+      .map((m) => ({ role: m.kind as "user" | "assistant" | "system", content: m.content }))
 
-    setMessages([...nextMessages, { role: "assistant", content: "" }])
-    setDraftMessage("")
-    setIsSending(true)
+  const stream = async (history: UiMsg[]) => {
+    const ctrl = new AbortController()
+    abortRef.current = ctrl
+    const assistantId = uid()
+    setMsgs([...history, { kind: "assistant", id: assistantId, content: "" }])
+    setDraft("")
+    setSending(true)
+    setModelThinking("")
     setThinkingStatus("")
-    setModelThinkingText("")
+    setThinkingKey((k) => k + 1)
+
+    let raw = ""
+    let lastToolId: string | null = null
 
     try {
-      const chatPayload = nextMessages.map((message) => ({
-        role: message.role,
-        content: message.content,
-      }))
-      let assistantReplyRaw = ""
-
       await streamChatRequest(
-        chatPayload,
+        chatHistory(history),
         {
-          onThinkingStatus: (text) => {
-            setThinkingStatus(text)
-          },
-          onThinkingModel: (text) => {
-            setModelThinkingText(text)
-          },
+          onThinkingStatus: (text) => setThinkingStatus(text),
+          onThinkingModel:  (text) => setModelThinking(text),
+
           onToolCall: (toolName, args) => {
-            setThinkingStatus(formatToolCallLabel(toolName, args))
+            const toolId = uid()
+            lastToolId = toolId
+            setMsgs((prev) => [
+              ...prev,
+              { kind: "tool", id: toolId, toolName, args, status: "running", summary: "running…" },
+            ])
           },
+
           onToolResult: (toolName, result) => {
-            const notFound = result.found === false || (result.items !== undefined && Array.isArray(result.items) && (result.items as unknown[]).length === 0)
-            setThinkingStatus(notFound ? `${toolName} → no results` : `${toolName} → done`)
+            const { summary, status } = toolResultSummary(toolName, result)
+            setMsgs((prev) =>
+              prev.map((m) =>
+                m.kind === "tool" && m.id === lastToolId
+                  ? { ...m, status, summary }
+                  : m
+              )
+            )
+            lastToolId = null
             onToolResult?.(toolName, result)
           },
-          onToken: (token) => {
-            assistantReplyRaw += token
-            const parsed = parseModelStream(assistantReplyRaw)
 
-            setMessages((currentMessages) => {
-              const updated = [...currentMessages]
-              const lastIndex = updated.length - 1
-              if (lastIndex >= 0 && updated[lastIndex].role === "assistant") {
-                if (parsed.hasExplicitThinking && !parsed.thinkingCompleted) {
-                  // <think> still open — stream into model thinking box
-                  setModelThinkingText(parsed.thinking.trim())
-                } else {
-                  const assistantAnswer = parsed.answer.trimStart()
-                  if (assistantAnswer.length > 0) {
-                    setThinkingStatus("")
-                  }
-                  updated[lastIndex] = { ...updated[lastIndex], content: assistantAnswer }
-                }
-              }
-              return updated
-            })
+          onToken: (token) => {
+            raw += token
+            const { thinking, answer, done } = parseThink(raw)
+            setMsgs((prev) =>
+              prev.map((m) =>
+                m.kind === "assistant" && m.id === assistantId
+                  ? { ...m, content: answer.trimStart() }
+                  : m
+              )
+            )
+            if (!done) setModelThinking(thinking.trim())
+            else { setModelThinking(""); setThinkingStatus("") }
           },
+
           onDone: () => {
-            const parsed = parseModelStream(assistantReplyRaw)
+            setModelThinking("")
             setThinkingStatus("")
-            if (!parsed.answer.trim()) {
-              setMessages((currentMessages) => {
-                const updated = [...currentMessages]
-                const lastIndex = updated.length - 1
-                if (lastIndex >= 0 && updated[lastIndex].role === "assistant") {
-                  updated[lastIndex] = {
-                    ...updated[lastIndex],
-                    content: "No response from model.",
-                  }
-                }
-                return updated
-              })
+            const { answer } = parseThink(raw)
+            if (!answer.trim()) {
+              setMsgs((prev) =>
+                prev.map((m) =>
+                  m.kind === "assistant" && m.id === assistantId
+                    ? { ...m, content: "No response from model." }
+                    : m
+                )
+              )
             }
           },
         },
-        {
-          signal: streamAbortController.signal,
-        }
+        { signal: ctrl.signal }
       )
-    } catch (error) {
-      if (isAbortError(error)) {
-        setMessages((currentMessages) => {
-          const updated = [...currentMessages]
-          const lastIndex = updated.length - 1
-          if (lastIndex >= 0 && updated[lastIndex].role === "assistant" && !updated[lastIndex].content.trim()) {
-            updated[lastIndex] = {
-              ...updated[lastIndex],
-              content: "Response stopped.",
-            }
-          }
-          return updated
-        })
-        return
+    } catch (err) {
+      const aborted = err instanceof DOMException && err.name === "AbortError"
+      if (aborted) {
+        setMsgs((prev) =>
+          prev.map((m) =>
+            m.kind === "assistant" && m.id === assistantId && !m.content.trim()
+              ? { ...m, content: "Response stopped." }
+              : m
+          )
+        )
+      } else {
+        const errMsg = err instanceof Error ? err.message : "Failed to contact AI"
+        setMsgs((prev) => [
+          ...prev.filter((m) => !(m.kind === "assistant" && m.id === assistantId)),
+          { kind: "assistant", id: uid(), content: `Error: ${errMsg}` },
+        ])
       }
-
-      const message = error instanceof Error ? error.message : "Failed to contact AI endpoint"
-      setMessages((currentMessages) => [
-        ...currentMessages.filter(
-          (chatMessage, index, array) => !(index === array.length - 1 && chatMessage.role === "assistant")
-        ),
-        { role: "assistant", content: `Error: ${message}` },
-      ])
     } finally {
-      if (activeStreamAbortControllerRef.current === streamAbortController) {
-        activeStreamAbortControllerRef.current = null
-      }
+      if (abortRef.current === ctrl) abortRef.current = null
+      setSending(false)
+      setModelThinking("")
       setThinkingStatus("")
-      setIsSending(false)
     }
   }
 
-  // This function streams a message to backend and updates UI incrementally.
-  const handleSendMessage = async () => {
-    const trimmed = draftMessage.trim()
-    if (!trimmed || isSending) {
+  const send = async () => {
+    const text = draft.trim()
+    if (!text || sending) return
+    const userMsg: UiMsg = { kind: "user", id: uid(), content: text }
+
+    if (editIdx !== null) {
+      const before = msgs
+        .filter((m): m is UserMsg | AssistantMsg => m.kind === "user" || m.kind === "assistant")
+        .slice(0, editIdx)
+      setEditIdx(null)
+      await stream([...before, userMsg])
       return
     }
 
-    const nextUserMessage: UiChatMessage = { role: "user", content: trimmed }
-
-    if (editingUserMessageIndex !== null) {
-      const conversationBeforeEdit = messages.slice(0, editingUserMessageIndex)
-      setEditingUserMessageIndex(null)
-      await streamAssistantResponse([...conversationBeforeEdit, nextUserMessage])
-      return
-    }
-
-    const messagesWithoutOldMapContext = messages.filter(
-      (message) => !(message.hidden && message.content.startsWith("Persistent current-map context for this chat session."))
+    // Strip stale map context, inject fresh one if present
+    const stripped = msgs.filter(
+      (m): m is UiMsg => !(m.kind === "user" && m.hidden && m.content.startsWith("Persistent current-map context"))
     )
-    const nextMessages = selectedBuildingContext
+    const next: UiMsg[] = selectedBuildingContext
       ? [
-          ...messagesWithoutOldMapContext,
+          ...stripped,
           {
-            role: "system" as const,
+            kind: "user" as const,
+            id: uid(),
             hidden: true,
             content: [
               "Persistent current-map context for this chat session.",
@@ -348,46 +239,39 @@ export function FieldMapChatSidebar({
               `geometry=${JSON.stringify(selectedBuildingContext.geometry)}`,
             ].join("\n"),
           },
-          nextUserMessage,
+          userMsg,
         ]
-      : [...messages, nextUserMessage]
+      : [...stripped, userMsg]
 
-    if (selectedBuildingContext) {
-      onClearSelectedBuildingContext?.()
-    }
-
-    await streamAssistantResponse(nextMessages)
+    if (selectedBuildingContext) onClearSelectedBuildingContext?.()
+    await stream(next)
   }
 
-  // This function retries a selected user message and regenerates from that point.
-  const handleRetryMessage = async (userMessageIndex: number) => {
-    if (isSending) {
-      return
-    }
-
-    const selectedMessage = messages[userMessageIndex]
-    if (!selectedMessage || selectedMessage.role !== "user") {
-      return
-    }
-
-    const conversationBeforeRetry = messages.slice(0, userMessageIndex)
-    await streamAssistantResponse([...conversationBeforeRetry, selectedMessage])
+  const retry = async (msgId: string) => {
+    if (sending) return
+    const idx = msgs.findIndex((m) => m.id === msgId && m.kind === "user")
+    if (idx === -1) return
+    const before = msgs.slice(0, idx).filter((m): m is UserMsg | AssistantMsg => m.kind === "user" || m.kind === "assistant")
+    await stream([...before, msgs[idx] as UserMsg])
   }
 
-  // This function pre-fills the input to edit a selected user question.
-  const handleEditMessage = (userMessageIndex: number) => {
-    if (isSending) {
-      return
-    }
-
-    const selectedMessage = messages[userMessageIndex]
-    if (!selectedMessage || selectedMessage.role !== "user") {
-      return
-    }
-
-    setEditingUserMessageIndex(userMessageIndex)
-    setDraftMessage(selectedMessage.content)
+  const editMsg = (msgId: string, visIdx: number) => {
+    if (sending) return
+    const m = msgs.find((m) => m.id === msgId)
+    if (!m || m.kind !== "user") return
+    setEditIdx(visIdx)
+    setDraft(m.content)
   }
+
+  const copyText = (id: string, text: string) => {
+    void navigator.clipboard.writeText(text).then(() => {
+      setCopiedId(id)
+      setTimeout(() => setCopiedId(null), 1500)
+    })
+  }
+
+  const visibleMsgs = msgs.filter((m) => !(m.kind === "user" && (m as UserMsg).hidden))
+  const thinkingKey_ = msgs.filter((m) => m.kind === "user").length
 
   return (
     <>
@@ -400,151 +284,154 @@ export function FieldMapChatSidebar({
         <MessageCircle size={18} />
       </button>
 
-      {isSidebarOpen ? (
+      {isOpen && (
         <aside className={`absolute left-0 top-0 z-30 flex h-full w-full flex-col border-r border-[#D3D1C7] bg-[#FAFAF8] shadow-xl transition-[max-width] duration-300 ease-in-out ${isExpanded ? "max-w-2xl" : "max-w-sm"}`}>
+
+          {/* Header */}
           <div className="flex items-center justify-between border-b border-[#D3D1C7] px-4 py-3">
             <h2 className="text-sm font-semibold text-[#085041]">Gemma4 Assistant</h2>
             <div className="flex items-center gap-1">
               <button
                 type="button"
                 onClick={handleNewConversation}
-                title="New conversation — clears history"
+                title="New conversation"
                 className="rounded-md px-2 py-1 text-xs font-medium text-[#085041] hover:bg-[#E1F5EE]"
               >
                 New Chat
               </button>
               <button
                 type="button"
-                onClick={() => setIsExpanded((prev) => !prev)}
-                title={isExpanded ? "Collapse sidebar" : "Expand sidebar"}
+                onClick={() => setIsExpanded((p) => !p)}
+                title={isExpanded ? "Collapse" : "Expand"}
                 className="rounded-md p-1.5 text-[#085041] hover:bg-[#E1F5EE]"
-                aria-label={isExpanded ? "Collapse sidebar" : "Expand sidebar"}
               >
                 {isExpanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
               </button>
               <button
                 type="button"
                 onClick={() => onOpenChange(false)}
-                className="rounded-md px-2 py-1 text-xs font-medium text-[#085041] hover:bg-[#E1F5EE]"
+                className="rounded-md p-1.5 text-[#085041] hover:bg-[#E1F5EE]"
               >
-                Close
+                <X size={14} />
               </button>
             </div>
           </div>
 
+          {/* Message list */}
           <div className="flex-1 space-y-2 overflow-y-auto p-4">
-            {messages.filter((message) => !message.hidden).length === 0 ? (
-              <p className="text-xs text-[#5a6b65]">Start by asking Gemma4 about this field area.</p>
-            ) : null}
+            {activeBatch && <BatchProgressCard batch={activeBatch} />}
 
-            {messages.map((message, index) => ({ message, originalIndex: index })).filter(({ message }) => !message.hidden).map(({ message, originalIndex }) => (
-              <div
-                key={`${message.role}-${originalIndex}`}
-                hidden={message.role !== "user" && !message.content.trim()}
-                className={
-                  message.role === "user"
-                    ? "group ml-6 rounded-lg bg-[#0F6E56] px-3 py-2 text-xs text-white"
-                    : "group mr-6 rounded-lg bg-[#E1F5EE] px-3 py-2 text-xs text-[#085041]"
-                }
-              >
-                {message.role === "assistant" ? (
-                  <>
-                    <ReactMarkdown
-                      remarkPlugins={[remarkGfm]}
-                      components={{
-                        p: ({ children }: ComponentPropsWithoutRef<"p">) => <p className="mb-2 last:mb-0">{children}</p>,
-                        ul: ({ children }: ComponentPropsWithoutRef<"ul">) => <ul className="mb-2 list-disc space-y-1 pl-4 last:mb-0">{children}</ul>,
-                        ol: ({ children }: ComponentPropsWithoutRef<"ol">) => <ol className="mb-2 list-decimal space-y-1 pl-4 last:mb-0">{children}</ol>,
-                        code: ({ children }: ComponentPropsWithoutRef<"code">) => <code className="rounded bg-[#d8efe8] px-1 py-0.5 font-mono text-[11px]">{children}</code>,
-                        pre: ({ children }: ComponentPropsWithoutRef<"pre">) => <pre className="mb-2 overflow-x-auto rounded bg-[#d8efe8] p-2 text-[11px] last:mb-0">{children}</pre>,
-                      }}
-                    >
-                      {message.content}
-                    </ReactMarkdown>
-                    {!isSending && message.content.trim() ? (
-                      <div className="mt-1.5 flex justify-end opacity-0 transition-opacity duration-150 group-hover:opacity-100">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            void navigator.clipboard.writeText(message.content).then(() => {
-                              setCopiedMessageIndex(originalIndex)
-                              setTimeout(() => setCopiedMessageIndex(null), 1500)
-                            })
-                          }}
-                          className="inline-flex h-6 w-6 items-center justify-center rounded border border-[#0b5f4b]/25 text-[#0b5f4b] transition-colors hover:bg-[#d0ece3]"
-                          aria-label="Copy response"
-                          title="Copy"
-                        >
-                          {copiedMessageIndex === originalIndex ? <Check size={12} /> : <Copy size={12} />}
-                        </button>
-                      </div>
-                    ) : null}
-                  </>
-                ) : (
-                  <>
-                    <p>{message.content}</p>
-                    {!isSending ? (
+            {visibleMsgs.length === 0 && !activeBatch && (
+              <p className="text-xs text-[#5a6b65]">Start by asking Gemma4 about this field area.</p>
+            )}
+
+            {visibleMsgs.map((msg, visIdx) => {
+              if (msg.kind === "tool") {
+                return (
+                  <ToolCallCard
+                    key={msg.id}
+                    toolName={msg.toolName}
+                    args={msg.args}
+                    status={msg.status}
+                    summary={msg.summary}
+                  />
+                )
+              }
+
+              if (msg.kind === "user") {
+                return (
+                  <div key={msg.id} className="group ml-6 rounded-lg bg-[#0F6E56] px-3 py-2 text-xs text-white">
+                    <p>{msg.content}</p>
+                    {!sending && (
                       <div className="mt-2 flex justify-end gap-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
                         <button
                           type="button"
-                          onClick={() => void handleRetryMessage(originalIndex)}
-                          className="inline-flex h-6 w-6 items-center justify-center rounded border border-white/35 text-white transition-colors hover:bg-white/10"
-                          aria-label="Retry question"
+                          onClick={() => void retry(msg.id)}
+                          className="inline-flex h-6 w-6 items-center justify-center rounded border border-white/35 text-white hover:bg-white/10"
                           title="Retry"
                         >
                           <RotateCcw size={12} />
                         </button>
                         <button
                           type="button"
-                          onClick={() => handleEditMessage(originalIndex)}
-                          className="inline-flex h-6 w-6 items-center justify-center rounded border border-white/35 text-white transition-colors hover:bg-white/10"
-                          aria-label="Edit question"
+                          onClick={() => editMsg(msg.id, visIdx)}
+                          className="inline-flex h-6 w-6 items-center justify-center rounded border border-white/35 text-white hover:bg-white/10"
                           title="Edit"
                         >
                           <Pencil size={12} />
                         </button>
                       </div>
-                    ) : null}
-                  </>
+                    )}
+                  </div>
+                )
+              }
+
+              // assistant
+              if (!msg.content.trim()) return null
+              return (
+                <div key={msg.id} className="group mr-6 rounded-lg bg-[#E1F5EE] px-3 py-2 text-xs text-[#085041]">
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    components={{
+                      p:   ({ children }: ComponentPropsWithoutRef<"p">)   => <p className="mb-2 last:mb-0">{children}</p>,
+                      ul:  ({ children }: ComponentPropsWithoutRef<"ul">)  => <ul className="mb-2 list-disc space-y-1 pl-4 last:mb-0">{children}</ul>,
+                      ol:  ({ children }: ComponentPropsWithoutRef<"ol">)  => <ol className="mb-2 list-decimal space-y-1 pl-4 last:mb-0">{children}</ol>,
+                      code:({ children }: ComponentPropsWithoutRef<"code">)=> <code className="rounded bg-[#d8efe8] px-1 py-0.5 font-mono text-[11px]">{children}</code>,
+                      pre: ({ children }: ComponentPropsWithoutRef<"pre">) => <pre className="mb-2 overflow-x-auto rounded bg-[#d8efe8] p-2 text-[11px] last:mb-0">{children}</pre>,
+                    }}
+                  >
+                    {msg.content}
+                  </ReactMarkdown>
+                  {!sending && msg.content.trim() && (
+                    <div className="mt-1.5 flex justify-end opacity-0 transition-opacity duration-150 group-hover:opacity-100">
+                      <button
+                        type="button"
+                        onClick={() => copyText(msg.id, msg.content)}
+                        className="inline-flex h-6 w-6 items-center justify-center rounded border border-[#0b5f4b]/25 text-[#0b5f4b] hover:bg-[#d0ece3]"
+                        title="Copy"
+                      >
+                        {copiedId === msg.id ? <Check size={12} /> : <Copy size={12} />}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+
+            {/* Live thinking */}
+            {sending && (modelThinking || thinkingStatus) && (
+              <div className="mr-6 space-y-1.5">
+                {thinkingStatus && (
+                  <p className="flex items-center gap-1.5 text-[10px] font-mono text-[#3A6F61]">
+                    <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-[#0F6E56]" />
+                    {thinkingStatus}
+                  </p>
+                )}
+                {modelThinking && (
+                  <ThinkingBubble text={modelThinking} resetKey={thinkingKey_} />
                 )}
               </div>
-            ))}
-
-            {isSending ? (
-              <div className="mr-6 space-y-1">
-                {/* Status line — shows tool name + args, or a bare pulse dot while waiting */}
-                <p className="flex items-center gap-1.5 text-[10px] font-mono text-[#3A6F61]">
-                  <span className="inline-block h-1.5 w-1.5 flex-shrink-0 animate-pulse rounded-full bg-[#0F6E56]" />
-                  {thinkingStatus || <span className="opacity-40">waiting…</span>}
-                </p>
-                {/* Model reasoning stream — only shown when the model emits <think> tokens */}
-                {modelThinkingText ? (
-                  <ThinkingBubble
-                    text={modelThinkingText}
-                    resetKey={messages.filter((m) => m.role === "user").length}
-                  />
-                ) : null}
-              </div>
-            ) : null}
+            )}
           </div>
 
+          {/* Input area */}
           <div className="border-t border-[#D3D1C7] p-3">
-            {editingUserMessageIndex !== null ? (
+            {editIdx !== null && (
               <p className="mb-2 text-[11px] font-medium text-[#0b5f4b]">Editing selected question…</p>
-            ) : null}
-            {selectedBuildingContext ? (
+            )}
+            {selectedBuildingContext && (
               <div className="mb-2 flex items-center justify-between rounded-md border border-[#0F6E56] bg-[#E1F5EE] px-2.5 py-1.5 text-xs text-[#085041]">
                 <span className="font-semibold">{selectedBuildingContext.label}</span>
                 <button
                   type="button"
                   onClick={onClearSelectedBuildingContext}
-                  aria-label="Remove selected building context"
                   className="rounded p-0.5 hover:bg-[#ccebe0]"
                 >
                   <X size={13} />
                 </button>
               </div>
-            ) : null}
+            )}
+            {/* Token bar */}
             <div className="mb-1.5 flex items-center gap-2">
               <div className="h-1 flex-1 overflow-hidden rounded-full bg-[#E6E3D8]">
                 <div
@@ -552,44 +439,39 @@ export function FieldMapChatSidebar({
                   style={{ width: `${Math.min(tokenPct, 100)}%` }}
                 />
               </div>
-              <span className="shrink-0 text-[10px] font-mono text-[#5a6b65]">
-                {tokenLabel} / 256K
-              </span>
+              <span className="shrink-0 text-[10px] font-mono text-[#5a6b65]">{tokenLabel} / 256K</span>
             </div>
             <textarea
-              value={draftMessage}
-              onChange={(event) => setDraftMessage(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault()
-                  void handleSendMessage()
-                }
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void send() }
               }}
-              placeholder="Ask Gemma4..."
+              placeholder="Ask Gemma4…"
               rows={3}
               className="w-full resize-none rounded-md border border-[#D3D1C7] bg-white px-3 py-2 text-xs text-[#1f2d28] outline-none focus:border-[#0F6E56]"
             />
             <div className="mt-2 grid grid-cols-2 gap-2">
               <button
                 type="button"
-                onClick={handleSendMessage}
-                disabled={isSending}
-                className="rounded-md bg-[#0F6E56] px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#085041] disabled:cursor-not-allowed disabled:bg-[#8cb8ad]"
+                onClick={() => void send()}
+                disabled={sending}
+                className="rounded-md bg-[#0F6E56] px-3 py-2 text-xs font-semibold text-white hover:bg-[#085041] disabled:cursor-not-allowed disabled:bg-[#8cb8ad]"
               >
-                {isSending ? "Sending..." : editingUserMessageIndex !== null ? "Save & Send" : "Send"}
+                {sending ? "Sending…" : editIdx !== null ? "Save & Send" : "Send"}
               </button>
               <button
                 type="button"
-                onClick={handleStopStreaming}
-                disabled={!isSending}
-                className="rounded-md border border-[#0F6E56] bg-white px-3 py-2 text-xs font-semibold text-[#0F6E56] transition-colors hover:bg-[#E1F5EE] disabled:cursor-not-allowed disabled:border-[#8cb8ad] disabled:text-[#8cb8ad]"
+                onClick={handleStop}
+                disabled={!sending}
+                className="rounded-md border border-[#0F6E56] bg-white px-3 py-2 text-xs font-semibold text-[#0F6E56] hover:bg-[#E1F5EE] disabled:cursor-not-allowed disabled:border-[#8cb8ad] disabled:text-[#8cb8ad]"
               >
                 Stop
               </button>
             </div>
           </div>
         </aside>
-      ) : null}
+      )}
     </>
   )
 }
