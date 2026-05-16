@@ -14,7 +14,7 @@ from models.chat import ChatRequest, ChatResponseData
 from prompts.base_system_prompt import build_bhumidrishti_system_prompt
 from services.ai_runtime import ACTIVE_GEMMA_MODEL
 from services.gemma_pipeline import CHAT_TOOLS, dispatch_tool
-from services.tools import resolve_tool_name
+from services.tools import resolve_tool_name, parse_colon_tool_call
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -27,58 +27,39 @@ logger = logging.getLogger(__name__)
 
 # This variable stores the chat and tool-agent addendum appended to the shared BhumiDrishti base prompt.
 CHAT_AGENT_SYSTEM_ADDENDUM = """
-Chat and agent interaction mode:
-- Answer the user's exact question directly and concisely.
-- The messages after this system prompt are the current chat conversation history.
-- Use the current chat history to answer follow-up questions like "what location did I say earlier?"
-- Do not claim you lack access to this current conversation history.
+You are a disaster response assistant. Answer the user's question directly. Use tools to fetch live data.
 
-Tool usage policy:
-- Use tools only when needed for factual location-specific answers.
-- Do not call all tools by default.
-- If user asks a specific question (for example only building info), call only the relevant tool.
-- Call multiple tools only when user asks for a broader analysis.
-- There is only one building information tool: get_building_info.
-- NEVER invent tool names. The ONLY valid building tool name is exactly "get_building_info".
-  Forbidden invented names (do NOT call these): get_building_info_at_location,
-  get_building_info_by_location, get_building_info_by_coordinates,
-  get_building_info_by_coords, get_building_info_by_point, get_building_info_by_geometry,
-  get_building_info_from_geometry, get_building_info_from_coordinates,
-  get_building_info_from_location, get_building_info_from_point,
-  get_building_by_location, get_building_by_coords, get_building_at_location,
-  find_building, lookup_building, or any other variant.
-  The ONLY valid assessment tool is "get_assessments" — never "get_assessments_at_location",
-  "get_assessments_by_location", "get_assessments_by_coords", or any variant.
-- get_building_info accepts three lookup modes — use whichever the user provides:
-  a) lat + lon (decimal degrees) → when the user gives GPS coordinates.
-     Always use parameter name "lon" (not "lng", not "longitude").
-     Example: get_building_info(lat=37.771743, lon=38.229158)
-  b) osm_id (integer) → when the user mentions a specific OSM building ID.
-  c) geometry (GeoJSON object) → when a map selection provides a polygon.
-- If the user provides GPS coordinates (lat/lon), call get_building_info with those
-  coordinates directly as lat and lon. Do not ask for an OSM ID first.
-- For coordination questions over existing records, use:
-  - get_assessments: query one or many existing assessment records. Use it for map/list filtering,
-    triage lists, or questions about province, site name, damage_type, structural_risk,
-    building_type/material/area/width/height, severity/action priority, flood_zone/flood risk,
-    elevation/slope, road_access/nearest road, confidence, worker_name, response_team/team name,
-    status, verified_by_ground, created_at, updated_at, responded_at, or spatial filters.
-    For spatial assessment filtering, pass geometry for GeoJSON polygons/features or lat/lon with
-    within_meters for radius search. Keep include_geometry true when results should display on the map.
-    Use single=true only when the user asks for one exact/latest/top assessment.
-  - get_sites: list sites with summary counts, filter by name/status/id, or spatial containment.
-  - get_field_teams: list available/busy teams before assigning.
-  - dispatch_assessments: assign one or many assessments to a team (or single worker) and set responded.
-  - update_assessment_status: change assessment status (responded or closed).
+TOOL ROUTING — follow these rules every time:
+1. User mentions "assessment", "ASS-XXXXX id", severity, damage_type, structural_risk, site name, worker, status, or asks to list/filter buildings → call get_assessments.
+2. User provides NEW coordinates (lat/lon), OSM ID, or a map polygon to look up one specific building → call get_building_info.
+3. User asks about sites (list all, one site, how many, site counts, site status) → call get_sites.
+4. User asks about field teams or workers → call get_field_teams.
+5. Never reuse coordinates from earlier in the conversation for a new question.
+6. Never invent tool names. Only valid names: get_building_info, get_assessments, get_sites, get_field_teams, dispatch_assessments, update_assessment_status.
 
-Dispatch policy:
-- Never assign to a busy team.
-- If user asks to dispatch but no team is provided, ask which team to use.
-- Suggest available teams from get_field_teams.
+get_assessments — key parameters:
+- assessment_id="ASS-XXXXX"  → exact single record lookup
+- severity=N (exact) | severity_min/max/gt/lt for ranges
+- damage_type, structural_risk, site_name, status, worker_name, response_team
+- recommended_action — use for "immediate search rescue" → "immediate_search_rescue", "urgent evacuation" → "urgent_evacuation", "structural assessment" → "structural_assessment"
+- occupant_status — "trapped", "potentially_trapped", "evacuated", "unknown"
+- include_geometry=true (default, keeps map overlay)
+- limit=N (default 20, increase to 100+ when user wants all results)
+- single=true ONLY when user asks for exactly one record — NEVER for plural queries like "show me buildings…"
 
-Output policy:
-- Provide the final answer in plain language (not strict assessment JSON) unless user explicitly asks for assessment JSON.
-- Keep responses practical for disaster field workers.
+get_building_info — only with user-provided data from current message:
+- lat + lon  (always "lon", not "lng")  |  osm_id  |  geometry (GeoJSON)
+
+get_sites — key rules:
+- "all sites", "list sites", "what sites", "available sites", "every site" → call with NO filters at all (empty args)
+- "site named X" or "the X site" → site_name="X" (partial match)
+- "site ID 5" → site_id=5
+- NEVER add status="active" unless the user explicitly says the word "active"
+- "available", "existing", "recorded" are NOT status filters — they mean list everything
+- Sites can have status "active", "processing", or "completed" — omitting status returns all of them
+
+Dispatch rules: never assign to a busy team; ask which team if not specified.
+Output: plain language answers; no raw JSON unless user asks.
 """.strip()
 
 # This variable stores the system prompt used by text chat and tool-agent endpoints.
@@ -90,9 +71,41 @@ def _sse_event(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
+# Maximum characters for any single assistant message in chat history.
+# Long listing responses (20 buildings, etc.) will be trimmed to prevent
+# the Gemma context window from filling up before the model can respond.
+_MAX_HISTORY_ASSISTANT_CHARS = 1800
+
+
+def _trim_history_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Truncate overly long assistant messages in history to avoid context overflow.
+
+    Only trims messages that are not the last one — the most recent exchange is
+    kept intact so the model has full context for the current turn.
+    """
+    if len(messages) <= 1:
+        return messages
+
+    trimmed = []
+    for i, msg in enumerate(messages):
+        is_last = i == len(messages) - 1
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        if not is_last and role == "assistant" and isinstance(content, str) and len(content) > _MAX_HISTORY_ASSISTANT_CHARS:
+            truncated = content[:_MAX_HISTORY_ASSISTANT_CHARS]
+            msg = {**msg, "content": truncated + "\n[...response truncated in history]"}
+            logger.debug(
+                "chat.history.assistant_truncated original_chars=%s truncated_to=%s",
+                len(content), _MAX_HISTORY_ASSISTANT_CHARS,
+            )
+        trimmed.append(msg)
+    return trimmed
+
+
 def _build_messages(payload: ChatRequest) -> list[dict[str, Any]]:
     """Build chat messages with the default system prompt prepended."""
     incoming_messages = [message.model_dump() for message in payload.messages]
+    incoming_messages = _trim_history_messages(incoming_messages)
     return [{"role": "system", "content": CHAT_SYSTEM_PROMPT}, *incoming_messages]
 
 
@@ -166,7 +179,10 @@ async def chat_with_gemma_stream(payload: ChatRequest) -> StreamingResponse:
                 chat_kwargs: dict[str, Any] = {
                     "model": MODEL_NAME,
                     "messages": messages,
-                    "options": {"temperature": payload.temperature},
+                    "options": {
+                        "temperature": payload.temperature,
+                        "num_ctx": 32768,   # explicit context window; prevents KV-cache bleed from prior sessions
+                    },
                     "stream": True,
                 }
                 if not force_answer_without_tools:
@@ -228,6 +244,9 @@ async def chat_with_gemma_stream(payload: ChatRequest) -> StreamingResponse:
                                     tool_args = {}
 
                             if isinstance(tool_name, str) and tool_name:
+                                raw_tool_name = tool_name
+
+                                # Step 1: resolve known name aliases.
                                 canonical_name = resolve_tool_name(tool_name)
                                 if canonical_name != tool_name:
                                     logger.warning(
@@ -235,9 +254,19 @@ async def chat_with_gemma_stream(payload: ChatRequest) -> StreamingResponse:
                                         iteration, tool_name, canonical_name,
                                     )
                                 tool_name = canonical_name
+
+                                # Step 2: parse colon-embedded params (e.g. get_assessments:severity:5 → args={severity:5}).
+                                tool_name, tool_args = parse_colon_tool_call(tool_name, tool_args)
+                                if tool_name != canonical_name:
+                                    logger.warning(
+                                        "chat.stream.tool_call.colon_parsed iteration=%s original=%s canonical=%s args=%s",
+                                        iteration, raw_tool_name, tool_name, tool_args,
+                                    )
+
                                 logger.info(
-                                    "chat.stream.tool_call.detected iteration=%s tool=%s args=%s",
+                                    "chat.stream.tool_call.detected iteration=%s raw_name=%s resolved_name=%s args=%s",
                                     iteration,
+                                    raw_tool_name,
                                     tool_name,
                                     tool_args,
                                 )
@@ -292,7 +321,13 @@ async def chat_with_gemma_stream(payload: ChatRequest) -> StreamingResponse:
 
                         logger.info("chat.stream.tool_call.executing tool=%s args=%s", tool_name, tool_args)
                         tool_result = await dispatch_tool(tool_name, tool_args, db_pool)
-                        logger.info("chat.stream.tool_call.completed tool=%s result=%s", tool_name, tool_result)
+                        filters_applied = tool_result.get("filters_applied") if isinstance(tool_result, dict) else None
+                        count = tool_result.get("count") if isinstance(tool_result, dict) else None
+                        success = tool_result.get("success") if isinstance(tool_result, dict) else None
+                        logger.info(
+                            "chat.stream.tool_call.completed tool=%s success=%s count=%s filters_applied=%s",
+                            tool_name, success, count, filters_applied,
+                        )
                         messages.append(
                             {
                                 "role": "tool",
@@ -309,17 +344,72 @@ async def chat_with_gemma_stream(payload: ChatRequest) -> StreamingResponse:
                         )
                         await asyncio.sleep(0)
 
-                    messages.append(
-                        {
+                    # If every tool call in this iteration returned an error (unknown tool name,
+                    # etc.), allow one more iteration so the model can retry with the correct name.
+                    all_tool_errors = all(
+                        isinstance(db_pool, object)
+                        and isinstance(
+                            messages[-len(aggregated_tool_calls) + i]
+                            if i < len(aggregated_tool_calls) else {},
+                            dict,
+                        )
+                        for i in range(len(aggregated_tool_calls))
+                    )
+                    # Re-derive from the tool messages we just appended.
+                    tool_messages_this_iter = [
+                        m for m in messages
+                        if m.get("role") == "tool"
+                    ][-len(aggregated_tool_calls):]
+                    all_tool_errors = all(
+                        '"error"' in m.get("content", "") and '"success"' not in m.get("content", "")
+                        for m in tool_messages_this_iter
+                    )
+
+                    if all_tool_errors and not force_answer_without_tools:
+                        logger.warning(
+                            "chat.stream.all_tool_errors iteration=%s — injecting correction, allowing retry",
+                            iteration,
+                        )
+                        messages.append({
                             "role": "system",
                             "content": (
-                                "Tool results are now available in the conversation. "
-                                "Answer the user's latest question directly using those tool results. "
-                                "Do not call any more tools."
+                                "All your tool calls failed because you used incorrect tool names. "
+                                "Valid tool names are exactly: get_assessments, get_building_info, "
+                                "get_sites, get_field_teams, dispatch_assessments, update_assessment_status. "
+                                "Call the correct tool now to answer the user's question."
                             ),
-                        }
+                        })
+                        # Don't set force_answer_without_tools — let the model retry with the right name.
+                    else:
+                        messages.append(
+                            {
+                                "role": "system",
+                                "content": (
+                                    "Tool results are now available in the conversation. "
+                                    "Answer the user's latest question directly using those tool results. "
+                                    "Do not call any more tools."
+                                ),
+                            }
+                        )
+                        force_answer_without_tools = True
+                    continue
+
+                # If the model produced nothing (no tokens, no tool calls), inject a nudge
+                # and retry once. This happens when context is borderline full or the model
+                # stalls — a short retry message usually unblocks it.
+                if not assistant_content and not aggregated_tool_calls and not force_answer_without_tools:
+                    logger.warning(
+                        "chat.stream.empty_response iteration=%s — injecting nudge and retrying",
+                        iteration,
                     )
-                    force_answer_without_tools = True
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "Your last response was empty. "
+                            "Please answer the user's most recent question now. "
+                            "If you need to call a tool, call it. Otherwise provide a direct text answer."
+                        ),
+                    })
                     continue
 
                 break

@@ -11,6 +11,7 @@ import {
   MapPin,
   Plus,
   Upload,
+  X,
 } from "lucide-react"
 import { toast } from "sonner"
 import {
@@ -412,11 +413,12 @@ export default function AssessmentPage() {
       )
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Upload failed"
+      const pageErrorMessage = `${f.name}: ${msg}`
       if (mode === "orthophoto") {
-        const pageErrorMessage = `${f.name}: ${msg}`
         setOrthophotoUploadError(pageErrorMessage)
-        toast(pageErrorMessage)
       }
+      // Show a toast for every upload failure so errors are never silent.
+      toast.error(pageErrorMessage)
       setFiles((prev) =>
         prev.map((x) => x.id === f.id ? { ...x, status: "error", errorMsg: msg } : x)
       )
@@ -432,7 +434,11 @@ export default function AssessmentPage() {
   // ── Derived state ────────────────────────────────────────────────────────
 
   const anyUploading  = files.some((f) => f.status === "uploading")
-  const allDone       = files.length > 0 && files.every((f) => f.status === "done" || f.status === "error")
+  // allDone is true only when every file succeeded — not when some errored.
+  const allDone       = files.length > 0 && files.every((f) => f.status === "done")
+  // allFinished is true when every file is in a terminal state (done or error).
+  const anyErrors     = files.some((f) => f.status === "error")
+  const allFinished   = files.length > 0 && files.every((f) => f.status === "done" || f.status === "error")
   const missingCoords = needsCoord ? files.filter((f) => f.status === "pending" && !f.coord.locked) : []
   const canUpload     = files.length > 0 && missingCoords.length === 0 && !anyUploading
   const visiblePendingBatches = pendingBatches.filter((batch) => {
@@ -734,7 +740,7 @@ export default function AssessmentPage() {
           </div>
         )}
 
-        {/* ── Upload CTA ───────────────────────────────────────────────────── */}
+        {/* ── Upload CTA — show when there are still pending/error files to (re)try ── */}
         {files.length > 0 && !allDone && (
           <button
             type="button"
@@ -759,19 +765,31 @@ export default function AssessmentPage() {
           </button>
         )}
 
-        {/* ── All done banner ──────────────────────────────────────────────── */}
-        {allDone && (
+        {/* ── All done / partial-error banner ─────────────────────────────── */}
+        {allFinished && (
           <div className="mt-4 space-y-2.5">
-            <div className="flex items-center justify-center gap-2 rounded-xl border border-[#A7D4C5] bg-[#EBF6F2] py-3 text-sm font-semibold text-[#0F6E56]">
-              <CheckCircle2 className="h-5 w-5" />
-              All files uploaded successfully
-            </div>
+            {allDone ? (
+              <div className="flex items-center justify-center gap-2 rounded-xl border border-[#A7D4C5] bg-[#EBF6F2] py-3 text-sm font-semibold text-[#0F6E56]">
+                <CheckCircle2 className="h-5 w-5" />
+                All files uploaded successfully
+              </div>
+            ) : anyErrors && !allDone ? (
+              <div className="flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
+                <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0 text-red-600" />
+                <div>
+                  <p className="text-sm font-semibold text-red-700">
+                    {files.filter((f) => f.status === "error").length} file{files.filter((f) => f.status === "error").length > 1 ? "s" : ""} failed to upload
+                  </p>
+                  <p className="text-xs text-red-600">Check the cards above for details. You can retry by clicking Upload again.</p>
+                </div>
+              </div>
+            ) : null}
             <button
               type="button"
               onClick={() => { setFiles([]); setWorkerName(""); setFieldNote("") }}
               className="h-10 w-full rounded-xl border border-[#D3D1C7] bg-[#F7F6F2] text-sm font-semibold text-[#4B5563] transition-colors hover:bg-[#EDEAE3]"
             >
-              Upload more files
+              {allDone ? "Upload more files" : "Clear and start over"}
             </button>
           </div>
         )}

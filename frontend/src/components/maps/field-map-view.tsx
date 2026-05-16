@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import maplibregl from "maplibre-gl"
 import { PMTiles, Protocol } from "pmtiles"
-import { Map, MapPin, Route, MapPinned, Building, Droplets, AlertTriangle, Mountain, SatelliteDish, ImageIcon, X, Loader2, ChevronRight } from "lucide-react"
+import { Map, MapPin, Route, MapPinned, Building, Droplets, AlertTriangle, Mountain, SatelliteDish, ImageIcon, X, Loader2, ChevronRight, LayoutList } from "lucide-react"
 import { toast } from "sonner"
 import { FieldMapChatSidebar } from "@/components/maps/field-map-chat-sidebar"
 import { FeatureInfoSidebar, type SelectedFeatureInfo } from "@/components/maps/feature-info-sidebar"
@@ -20,10 +20,16 @@ import {
   getBatchStatus,
   fetchPendingBatches,
   fetchBatchSites,
+  fetchSitesFull,
+  fetchSiteBuildings,
+  fetchUnassignedUploads,
   startOrthophotoBatch,
   subscribeBatchStream,
   type PendingBatchRecord,
   type BatchSseEvent,
+  type SiteRecord,
+  type SiteBuildingsResult,
+  type UnassignedUpload,
 } from "@/lib/api/batches"
 
 // This variable holds the shared PMTiles protocol instance for MapLibre.
@@ -646,6 +652,7 @@ export function FieldMapView() {
     id: string
     name: string
     geojson: GeoJsonFeatureCollection
+    visible: boolean
   }
 
   type SelectedBuildingChatContext = {
@@ -662,7 +669,7 @@ export function FieldMapView() {
   // This variable stores one dynamic map layer driven by AI chat tool-result geometry.
   const aiChatResultGeoJsonRef = useRef<GeoJsonFeatureCollection>(createEmptyFeatureCollection())
   const chatGeometryOverlaysRef = useRef<ChatGeometryOverlay[]>([])
-  const [chatGeometryOverlays, setChatGeometryOverlays] = useState<Array<{ id: string; name: string }>>([])
+  const [chatGeometryOverlays, setChatGeometryOverlays] = useState<Array<{ id: string; name: string; visible: boolean }>>([])
   // This variable stores a map-bound helper used to focus one assessment and open its popup.
   const showAssessmentOnMapRef = useRef<((assessmentId: string, lat: number, lon: number) => void) | null>(null)
 
@@ -712,17 +719,31 @@ export function FieldMapView() {
   // ── Batch progress state ──────────────────────────────────────────────────
   type BuildingEvent = { osm_id: number; status: string; assessment_id?: string; severity?: number; error?: string; chip_path?: string; pre_chip_path?: string }
   type AiStageEvent = { osm_id: number; stage: string; thought: string }
-  type BuildingLiveProgress = { osm_id: number; progressPercent: number; stage: string; thought: string; status: string; updatedAt: number }
+  type BuildingLiveProgress = { osm_id: number; progressPercent: number; stage: string; thought: string; status: string; updatedAt: number; totalTokens?: number; contextWindow?: number; thinkingText?: string; responseText?: string }
   const [activeBatchId, setActiveBatchId] = useState<string | null>(null)
+  const [batchTokensUsed, setBatchTokensUsed] = useState<number>(0)
   const [batchProgress, setBatchProgress] = useState<{
     total: number; processed: number; failed: number; skipped: number; events: BuildingEvent[]
   } | null>(null)
   const [batchDone, setBatchDone] = useState(false)
   const [currentAiStage, setCurrentAiStage] = useState<AiStageEvent | null>(null)
   const [batchBuildingProgress, setBatchBuildingProgress] = useState<Record<number, BuildingLiveProgress>>({})
+  const [currentThinkingFull, setCurrentThinkingFull] = useState<string>("")
+  const [currentResponseFull, setCurrentResponseFull] = useState<string>("")
+  const [aiThinkingExpanded, setAiThinkingExpanded] = useState(false)
   const [processingOsmIds, setProcessingOsmIds] = useState<number[]>([])
   const [processingBlinkOn, setProcessingBlinkOn] = useState(false)
   const [batchWasStopped, setBatchWasStopped] = useState(false)
+  const [activeBatchSiteName, setActiveBatchSiteName] = useState<string>("")
+  const [sitesFullList, setSitesFullList] = useState<SiteRecord[]>([])
+  const [siteBuildingsPanel, setSiteBuildingsPanel] = useState<SiteBuildingsResult | null>(null)
+  const [siteBuildingsPanelLoading, setSiteBuildingsPanelLoading] = useState(false)
+  // Unassigned uploads notification.
+  const [unassignedUploads, setUnassignedUploads] = useState<UnassignedUpload[]>([])
+  const [unassignedUploadsLoading, setUnassignedUploadsLoading] = useState(false)
+  const [showUnassignedOnMap, setShowUnassignedOnMap] = useState(false)
+  const [unassignedNotifDismissed, setUnassignedNotifDismissed] = useState(false)
+  const unassignedPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [pendingBatches, setPendingBatches] = useState<PendingBatchRecord[]>([])
   const [dismissedPendingBatchIds, setDismissedPendingBatchIds] = useState<string[]>([])
   const [selectedPendingBatchId, setSelectedPendingBatchId] = useState<string | null>(null)
@@ -933,7 +954,11 @@ export function FieldMapView() {
       setBatchDone(false)
       setBatchWasStopped(false)
       setBatchBuildingProgress({})
+      setBatchTokensUsed(0)
       setProcessingOsmIds([])
+      setCurrentThinkingFull("")
+      setCurrentResponseFull("")
+      setAiThinkingExpanded(false)
 
       const cleanup = subscribeBatchStream(
         bId,
@@ -1007,12 +1032,19 @@ export function FieldMapView() {
             const incomingProgress = Number(ev.progress_percent)
             const normalizedProgress = Number.isFinite(incomingProgress) ? incomingProgress : 45
             const liveText = getLiveAiTextFromEvent(ev, "AI is analyzing this building.")
+            const incomingThinking = typeof ev.thinking_text === "string" && ev.thinking_text.trim() ? ev.thinking_text.trim() : undefined
+            const incomingResponse = typeof ev.response_text === "string" && ev.response_text.trim() ? ev.response_text.trim() : undefined
+            if (ev.stage === "context_window_full") {
+              toast.warning(`Building ${osmId}: context window full — model ran out of space. Result may be incomplete.`, { duration: 8000 })
+            }
             setProcessingOsmIds((prev) => (prev.includes(osmId) ? prev : [...prev, osmId]))
             setCurrentAiStage({
               osm_id: osmId,
               stage: String(ev.stage || "processing"),
               thought: liveText,
             })
+            if (incomingThinking) setCurrentThinkingFull(incomingThinking)
+            if (incomingResponse) setCurrentResponseFull(incomingResponse)
             setBatchBuildingProgress((prev) => ({
               ...prev,
               [osmId]: {
@@ -1029,6 +1061,8 @@ export function FieldMapView() {
                 thought: liveText,
                 status: "processing",
                 updatedAt: Date.now(),
+                thinkingText: incomingThinking ?? prev[osmId]?.thinkingText,
+                responseText: incomingResponse ?? prev[osmId]?.responseText,
               },
             }))
           }
@@ -1040,6 +1074,9 @@ export function FieldMapView() {
             if (ev.type === "building_done") {
               scheduleAssessmentsLayerRefresh()
               setCurrentAiStage(null)
+              setCurrentThinkingFull("")
+              setCurrentResponseFull("")
+              if (ev.total_tokens) setBatchTokensUsed((t) => t + Number(ev.total_tokens))
               const osmId = Number(ev.osm_id)
               setProcessingOsmIds((prevIds) => prevIds.filter((id) => id !== osmId))
               setBatchBuildingProgress((prevProgress) => ({
@@ -1058,6 +1095,8 @@ export function FieldMapView() {
                   thought: "Building analysis complete.",
                   status: "done",
                   updatedAt: Date.now(),
+                  totalTokens: ev.total_tokens ? Number(ev.total_tokens) : undefined,
+                  contextWindow: ev.context_window ? Number(ev.context_window) : undefined,
                 },
               }))
               return {
@@ -1179,6 +1218,13 @@ export function FieldMapView() {
     map.setFilter("processing-buildings-outline", filterExpression)
     map.setPaintProperty("processing-buildings-fill", "fill-opacity", processingBlinkOn ? 0.32 : 0.12)
     map.setPaintProperty("processing-buildings-outline", "line-opacity", processingBlinkOn ? 0.95 : 0.35)
+    // Raise highlight layers above imagery rasters so they stay visible when
+    // post-earthquake or satellite tiles are turned on (rasters are opaque and
+    // would otherwise bury these vector layers).
+    if (osmIds.length > 0) {
+      map.moveLayer("processing-buildings-fill")
+      map.moveLayer("processing-buildings-outline")
+    }
   }, [processingOsmIds, processingBlinkOn])
 
   // This function updates one layer state safely.
@@ -1364,6 +1410,21 @@ export function FieldMapView() {
     }
   }, [])
 
+  // This function fetches uploads with no site and updates the notification.
+  const refreshUnassignedUploads = useCallback(async (silent = false) => {
+    if (!silent) setUnassignedUploadsLoading(true)
+    try {
+      const result = await fetchUnassignedUploads()
+      setUnassignedUploads(result.uploads)
+      // Re-show notification if new unassigned uploads appear.
+      if (result.count > 0) setUnassignedNotifDismissed(false)
+    } catch {
+      // non-critical, keep last state
+    } finally {
+      if (!silent) setUnassignedUploadsLoading(false)
+    }
+  }, [])
+
   // This function handles double-click to close the polygon and open batch modal.
   const handleDrawDblClick = useCallback(
     async (e: maplibregl.MapMouseEvent) => {
@@ -1447,11 +1508,17 @@ export function FieldMapView() {
         batchStreamCleanupRef.current = null
       }
       setActiveBatchId(bId)
+      setActiveBatchSiteName(resolvedSiteName)
+      setSiteBuildingsPanel(null)
       setBatchProgress({ total: 0, processed: 0, failed: 0, skipped: 0, events: [] })
       setBatchDone(false)
       setBatchWasStopped(false)
       setBatchBuildingProgress({})
+      setBatchTokensUsed(0)
       setProcessingOsmIds([])
+      setCurrentThinkingFull("")
+      setCurrentResponseFull("")
+      setAiThinkingExpanded(false)
 
       const cleanup = subscribeBatchStream(
         bId,
@@ -1526,12 +1593,19 @@ export function FieldMapView() {
             const incomingProgress = Number(ev.progress_percent)
             const normalizedProgress = Number.isFinite(incomingProgress) ? incomingProgress : 45
             const liveText = getLiveAiTextFromEvent(ev, "AI is analyzing this building.")
+            const incomingThinking = typeof ev.thinking_text === "string" && ev.thinking_text.trim() ? ev.thinking_text.trim() : undefined
+            const incomingResponse = typeof ev.response_text === "string" && ev.response_text.trim() ? ev.response_text.trim() : undefined
+            if (ev.stage === "context_window_full") {
+              toast.warning(`Building ${osmId}: context window full — model ran out of space. Result may be incomplete.`, { duration: 8000 })
+            }
             setProcessingOsmIds((prev) => (prev.includes(osmId) ? prev : [...prev, osmId]))
             setCurrentAiStage({
               osm_id: osmId,
               stage: ev.stage as string,
               thought: liveText,
             })
+            if (incomingThinking) setCurrentThinkingFull(incomingThinking)
+            if (incomingResponse) setCurrentResponseFull(incomingResponse)
             setBatchBuildingProgress((prev) => ({
               ...prev,
               [osmId]: {
@@ -1548,6 +1622,8 @@ export function FieldMapView() {
                 thought: liveText,
                 status: "processing",
                 updatedAt: Date.now(),
+                thinkingText: incomingThinking ?? prev[osmId]?.thinkingText,
+                responseText: incomingResponse ?? prev[osmId]?.responseText,
               },
             }))
             return
@@ -1560,6 +1636,9 @@ export function FieldMapView() {
             if (ev.type === "building_done") {
               scheduleAssessmentsLayerRefresh()
               setCurrentAiStage(null)
+              setCurrentThinkingFull("")
+              setCurrentResponseFull("")
+              if (ev.total_tokens) setBatchTokensUsed((t) => t + Number(ev.total_tokens))
               const osmId = Number(ev.osm_id)
               setProcessingOsmIds((prev) => prev.filter((id) => id !== osmId))
               setBatchBuildingProgress((prevProgress) => ({
@@ -1578,6 +1657,8 @@ export function FieldMapView() {
                   thought: "Building analysis complete.",
                   status: "done",
                   updatedAt: Date.now(),
+                  totalTokens: ev.total_tokens ? Number(ev.total_tokens) : undefined,
+                  contextWindow: ev.context_window ? Number(ev.context_window) : undefined,
                 },
               }))
               return {
@@ -1699,6 +1780,30 @@ export function FieldMapView() {
     setSingleBldgPickerOpen(true)
   }, [loadExistingSites])
 
+  // This function fetches and opens the Site Buildings panel for the active batch's site.
+  const openSiteBuildingsPanel = useCallback(async (siteName: string) => {
+    setSiteBuildingsPanelLoading(true)
+    setSiteBuildingsPanel(null)
+    try {
+      const sites = await fetchSitesFull()
+      const matched = sites.find((s) => s.name.toLowerCase() === siteName.toLowerCase())
+      if (!matched) {
+        toast.error(`Site "${siteName}" not found`)
+        return
+      }
+      const result = await fetchSiteBuildings(matched.id)
+      if (!result) {
+        toast.error("Failed to load site buildings")
+        return
+      }
+      setSiteBuildingsPanel(result)
+    } catch (err) {
+      toast.error(`Failed to load site buildings: ${err}`)
+    } finally {
+      setSiteBuildingsPanelLoading(false)
+    }
+  }, [])
+
   // This function opens Gemma4 chat with a building-specific tool-use prompt.
   const handleAskAiAboutBuilding = useCallback((
     _properties: Record<string, unknown>,
@@ -1723,10 +1828,6 @@ export function FieldMapView() {
     const pending = pendingBldgRef.current
     if (!pending) return
     const resolvedSiteName = useNewSite ? newSiteNameInput.trim() : selectedExistingSite.trim()
-    if (!resolvedSiteName) {
-      toast.error("Choose or enter a site name")
-      return
-    }
     setSingleBldgPickerOpen(false)
     const { osmId, lat, lon } = pending
     pendingBldgRef.current = null
@@ -1921,15 +2022,17 @@ export function FieldMapView() {
     ensureAiChatResultLayers(map)
 
     const mergedFeatures = chatGeometryOverlaysRef.current.flatMap((overlay) =>
-      (overlay.geojson.features ?? []).map((feature, index) => ({
-        ...feature,
-        id: feature.id ?? `${overlay.id}-feature-${index}`,
-        properties: {
-          ...(feature.properties ?? {}),
-          overlay_id: overlay.id,
-          overlay_name: overlay.name,
-        },
-      }))
+      overlay.visible
+        ? (overlay.geojson.features ?? []).map((feature, index) => ({
+            ...feature,
+            id: feature.id ?? `${overlay.id}-feature-${index}`,
+            properties: {
+              ...(feature.properties ?? {}),
+              overlay_id: overlay.id,
+              overlay_name: overlay.name,
+            },
+          }))
+        : []
     )
     const mergedGeoJson = {
       type: "FeatureCollection",
@@ -1949,6 +2052,7 @@ export function FieldMapView() {
       chatGeometryOverlaysRef.current.map((overlay) => ({
         id: overlay.id,
         name: overlay.name,
+        visible: overlay.visible,
       }))
     )
     syncAiChatGeometrySource()
@@ -1959,6 +2063,36 @@ export function FieldMapView() {
     setChatGeometryOverlays([])
     syncAiChatGeometrySource()
   }, [syncAiChatGeometrySource])
+
+  const handleToggleChatGeometryOverlay = useCallback((overlayId: string) => {
+    chatGeometryOverlaysRef.current = chatGeometryOverlaysRef.current.map((overlay) =>
+      overlay.id === overlayId ? { ...overlay, visible: !overlay.visible } : overlay
+    )
+    setChatGeometryOverlays(
+      chatGeometryOverlaysRef.current.map((overlay) => ({
+        id: overlay.id,
+        name: overlay.name,
+        visible: overlay.visible,
+      }))
+    )
+    syncAiChatGeometrySource()
+  }, [syncAiChatGeometrySource])
+
+  const handleFlyToOverlay = useCallback((overlayId: string) => {
+    const overlay = chatGeometryOverlaysRef.current.find((o) => o.id === overlayId)
+    if (!overlay) return
+    const map = mapInstanceRef.current
+    if (!map || !map.isStyleLoaded()) return
+    const allPairs = overlay.geojson.features.flatMap((feature) =>
+      collectLngLatPairsFromGeoJsonGeometry(feature.geometry as { type: string; coordinates: unknown })
+    )
+    if (allPairs.length === 0) return
+    const bounds = new maplibregl.LngLatBounds(allPairs[0], allPairs[0])
+    for (const [lng, lat] of allPairs.slice(1)) {
+      bounds.extend([lng, lat])
+    }
+    map.fitBounds(bounds, { padding: 70, duration: 900, maxZoom: 16 })
+  }, [])
 
   // This function renders geometry returned by AI tool results onto dedicated map overlays.
   const handleChatToolResult = useCallback((toolName: string, result: Record<string, unknown>) => {
@@ -1979,30 +2113,36 @@ export function FieldMapView() {
         id: overlayId,
         name: extraction.overlayName,
         geojson: nextGeoJson,
+        visible: true,
       },
     ]
     setChatGeometryOverlays(
       chatGeometryOverlaysRef.current.map((overlay) => ({
         id: overlay.id,
         name: overlay.name,
+        visible: overlay.visible,
       }))
     )
     syncAiChatGeometrySource()
 
     const map = mapInstanceRef.current
-    if (!map || !map.isStyleLoaded()) {
+    if (!map) {
       return
     }
 
+    // Defer fitBounds by one animation frame so the source.setData() call inside
+    // syncAiChatGeometrySource has time to process before we move the camera.
     const allPairs = features.flatMap((feature) =>
       collectLngLatPairsFromGeoJsonGeometry(feature.geometry as { type: string; coordinates: unknown })
     )
     if (allPairs.length > 0) {
-      const bounds = new maplibregl.LngLatBounds(allPairs[0], allPairs[0])
-      for (const [lng, lat] of allPairs.slice(1)) {
-        bounds.extend([lng, lat])
-      }
-      map.fitBounds(bounds, { padding: 70, duration: 900, maxZoom: 16 })
+      requestAnimationFrame(() => {
+        const bounds = new maplibregl.LngLatBounds(allPairs[0], allPairs[0])
+        for (const [lng, lat] of allPairs.slice(1)) {
+          bounds.extend([lng, lat])
+        }
+        map.fitBounds(bounds, { padding: 70, duration: 900, maxZoom: 16 })
+      })
     }
   }, [syncAiChatGeometrySource])
 
@@ -2059,8 +2199,11 @@ export function FieldMapView() {
         if (!isMounted) return
 
         setActiveBatchId(resumedBatchId)
+        setActiveBatchSiteName(latestActive.site_name || "")
+        setSiteBuildingsPanel(null)
         setBatchDone(false)
         setBatchWasStopped(false)
+        setBatchTokensUsed(0)
         setBatchProgress({
           total: Math.max(0, Number(status.total_buildings) || 0),
           processed: Math.max(0, Number(status.processed) || 0),
@@ -2332,6 +2475,65 @@ export function FieldMapView() {
       window.clearInterval(timer)
     }
   }, [activeBatchId, batchDone])
+
+  // This effect polls for unassigned uploads on mount and every 30 seconds.
+  useEffect(() => {
+    void refreshUnassignedUploads()
+    const timer = window.setInterval(() => { void refreshUnassignedUploads(true) }, 30_000)
+    return () => {
+      window.clearInterval(timer)
+    }
+  }, [refreshUnassignedUploads])
+
+  // Refresh unassigned uploads after batch completes — the new site may now cover them.
+  useEffect(() => {
+    if (batchDone) void refreshUnassignedUploads(true)
+  }, [batchDone, refreshUnassignedUploads])
+
+  // This effect keeps unassigned-upload building highlights in sync with state.
+  // Uses the turkey_buildings polygon source (same as processing highlights) so the
+  // actual footprint is shown, not a GPS point.  moveLayer() is called every time to
+  // keep the layers on top of any raster imagery overlays added later.
+  useEffect(() => {
+    const map = mapInstanceRef.current
+    if (!map) return
+
+    const active = showUnassignedOnMap && unassignedUploads.length > 0
+
+    // ── Building polygon highlight (for uploads with a matched osm_id) ────────
+    const osmIds = active
+      ? unassignedUploads
+          .map((u) => u.nearby_osm_id)
+          .filter((id): id is number => id !== null)
+      : []
+    const filterExpr = ["in", ["get", "osm_id"], ["literal", osmIds]] as unknown as maplibregl.FilterSpecification
+
+    if (map.getLayer("unassigned-buildings-fill")) {
+      map.setFilter("unassigned-buildings-fill", filterExpr)
+      map.moveLayer("unassigned-buildings-fill")
+    }
+    if (map.getLayer("unassigned-buildings-outline")) {
+      map.setFilter("unassigned-buildings-outline", filterExpr)
+      map.moveLayer("unassigned-buildings-outline")
+    }
+
+    // ── Fallback point for uploads with no nearby building ────────────────────
+    const orphanedPoints = active
+      ? unassignedUploads.filter((u) => u.nearby_osm_id === null)
+      : []
+    const ptsSrc = map.getSource("unassigned-uploads-pts") as maplibregl.GeoJSONSource | undefined
+    if (ptsSrc) {
+      ptsSrc.setData({
+        type: "FeatureCollection",
+        features: orphanedPoints.map((u) => ({
+          type: "Feature" as const,
+          geometry: { type: "Point" as const, coordinates: [u.lon, u.lat] },
+          properties: { id: u.id, file_type: u.file_type },
+        })),
+      })
+      if (map.getLayer("unassigned-uploads-dot")) map.moveLayer("unassigned-uploads-dot")
+    }
+  }, [showUnassignedOnMap, unassignedUploads])
 
   // This function initializes the map once and tears it down on unmount.
   useEffect(() => {
@@ -2752,6 +2954,55 @@ export function FieldMapView() {
         ensurePendingBatchHighlightLayer(map)
       }
 
+      // ── Unassigned-uploads: building polygon highlight (orange) ─────────────
+      // Uses the same turkey_buildings vector source as the processing layers so the
+      // actual building footprint is highlighted, not just a GPS point.
+      const unassignedBldgSourceId = getOverlaySourceId("turkey_buildings")
+      if (map.getSource(unassignedBldgSourceId)) {
+        if (!map.getLayer("unassigned-buildings-fill")) {
+          map.addLayer({
+            id: "unassigned-buildings-fill",
+            type: "fill",
+            source: unassignedBldgSourceId,
+            filter: ["in", ["get", "osm_id"], ["literal", []]],
+            paint: {
+              "fill-color": "#F97316",
+              "fill-opacity": 0.28,
+            },
+          })
+        }
+        if (!map.getLayer("unassigned-buildings-outline")) {
+          map.addLayer({
+            id: "unassigned-buildings-outline",
+            type: "line",
+            source: unassignedBldgSourceId,
+            filter: ["in", ["get", "osm_id"], ["literal", []]],
+            paint: {
+              "line-color": "#F97316",
+              "line-width": 3,
+              "line-opacity": 0.95,
+            },
+          })
+        }
+      }
+      // Fallback: small orange dot for uploads that have no nearby building match.
+      map.addSource("unassigned-uploads-pts", {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      })
+      map.addLayer({
+        id: "unassigned-uploads-dot",
+        type: "circle",
+        source: "unassigned-uploads-pts",
+        paint: {
+          "circle-radius": 8,
+          "circle-color": "#F97316",
+          "circle-opacity": 0.9,
+          "circle-stroke-width": 2,
+          "circle-stroke-color": "#ffffff",
+        },
+      })
+
       mapInstanceRef.current = map
 
       return map
@@ -2794,7 +3045,7 @@ export function FieldMapView() {
       />
 
       {chatGeometryOverlays.length > 0 && (
-        <div className="absolute left-4 top-16 z-30 w-72 rounded-lg border border-[#D3D1C7] bg-white shadow-xl">
+        <div className="absolute right-16 top-4 z-30 w-72 rounded-lg border border-[#D3D1C7] bg-white shadow-xl">
           <div className="flex items-center justify-between rounded-t-lg bg-[#9A3412] px-3 py-2">
             <span className="text-sm font-bold text-white">AI Geometry Overlays</span>
             <button
@@ -2809,20 +3060,134 @@ export function FieldMapView() {
             {chatGeometryOverlays.map((overlay) => (
               <div
                 key={overlay.id}
-                className="flex items-center justify-between gap-2 rounded border border-[#E6E3D8] bg-[#FAFAF8] px-2 py-1.5"
+                className={`flex items-center justify-between gap-2 rounded border px-2 py-1.5 transition-colors ${
+                  overlay.visible
+                    ? "border-[#E6E3D8] bg-[#FAFAF8]"
+                    : "border-[#E6E3D8] bg-[#F0EFEB] opacity-50"
+                }`}
               >
-                <span className="truncate text-xs font-medium text-[#17352b]">{overlay.name}</span>
                 <button
                   type="button"
-                  onClick={() => handleRemoveChatGeometryOverlay(overlay.id)}
-                  className="rounded border border-[#D3D1C7] bg-white px-1.5 py-0.5 text-[10px] font-semibold text-[#9A3412] hover:bg-[#F3F1E9]"
-                  title="Remove overlay"
-                  aria-label={`Remove ${overlay.name}`}
+                  onClick={() => handleFlyToOverlay(overlay.id)}
+                  className="min-w-0 flex-1 truncate text-left text-xs font-medium text-[#17352b] hover:text-[#9A3412] hover:underline"
+                  title="Fly to this overlay"
                 >
-                  <X size={12} />
+                  {overlay.name}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleToggleChatGeometryOverlay(overlay.id)}
+                  className={`shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-semibold transition-colors ${
+                    overlay.visible
+                      ? "border-[#0F6E56] bg-[#E1F5EE] text-[#0F6E56] hover:bg-[#c8ede0]"
+                      : "border-[#D3D1C7] bg-white text-[#8a9490] hover:bg-[#F3F1E9]"
+                  }`}
+                  title={overlay.visible ? "Hide overlay" : "Show overlay"}
+                  aria-label={overlay.visible ? `Hide ${overlay.name}` : `Show ${overlay.name}`}
+                >
+                  {overlay.visible ? "On" : "Off"}
                 </button>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* Unassigned uploads notification */}
+      {unassignedUploads.length > 0 && !unassignedNotifDismissed && (
+        <div className="absolute bottom-16 right-4 z-30 w-72 rounded-lg border border-orange-200 bg-white shadow-xl">
+          {/* Header */}
+          <div className="flex items-center justify-between rounded-t-lg bg-orange-500 px-3 py-2">
+            <div className="flex items-center gap-2">
+              <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-white text-[11px] font-bold text-orange-600">
+                {unassignedUploads.length}
+              </span>
+              <span className="text-sm font-bold text-white">Uploads need a site</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => { setUnassignedNotifDismissed(true); setShowUnassignedOnMap(false) }}
+              className="text-white/70 hover:text-white"
+            >
+              <X size={15} />
+            </button>
+          </div>
+
+          {/* Body */}
+          <div className="px-3 py-2.5 space-y-2">
+            <p className="text-[11px] text-[#6b7280] leading-relaxed">
+              {unassignedUploads.length === 1
+                ? "1 ground photo/video has no site assigned."
+                : `${unassignedUploads.length} ground photos/videos have no site assigned.`}{" "}
+              Draw a site boundary that covers them so the batch pipeline can process them.
+            </p>
+
+            {/* Upload list */}
+            <div className="max-h-32 space-y-1 overflow-y-auto rounded-md border border-[#F3F1E9] bg-[#FAFAF8] px-2 py-1.5">
+              {unassignedUploads.map((u) => (
+                <div key={u.id} className="flex items-center gap-2 text-[10px]">
+                  <span className={`shrink-0 rounded px-1 py-0.5 font-semibold ${
+                    u.file_type === "video"
+                      ? "bg-purple-100 text-purple-700"
+                      : "bg-orange-100 text-orange-700"
+                  }`}>
+                    {u.file_type === "video" ? "VID" : "IMG"}
+                  </span>
+                  <span className="min-w-0 truncate text-[#17352b]" title={u.filename}>
+                    {u.filename || u.id}
+                  </span>
+                  <button
+                    type="button"
+                    className="shrink-0 text-[#0F6E56] underline"
+                    title="Fly to building"
+                    onClick={() => {
+                      setShowUnassignedOnMap(true)
+                      const map = mapInstanceRef.current
+                      if (map) map.flyTo({ center: [u.lon, u.lat], zoom: 19, duration: 800 })
+                    }}
+                  >
+                    ↗
+                  </button>
+                </div>
+              ))}
+            </div>
+
+            {/* Actions */}
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowUnassignedOnMap((v) => !v)
+                  if (!showUnassignedOnMap && unassignedUploads.length > 0) {
+                    // Fly to first upload location.
+                    const first = unassignedUploads[0]
+                    const map = mapInstanceRef.current
+                    if (map) {
+                      map.flyTo({
+                        center: [first.lon, first.lat],
+                        zoom: 16,
+                        duration: 900,
+                      })
+                    }
+                  }
+                }}
+                className={`flex-1 rounded-md border py-1.5 text-[11px] font-semibold transition-colors ${
+                  showUnassignedOnMap
+                    ? "border-orange-400 bg-orange-100 text-orange-700 hover:bg-orange-200"
+                    : "border-[#D3D1C7] bg-[#FAFAF8] text-[#17352b] hover:bg-[#ECEAE2]"
+                }`}
+              >
+                {showUnassignedOnMap ? "Hide on Map" : "Show on Map"}
+              </button>
+              <button
+                type="button"
+                onClick={() => void refreshUnassignedUploads()}
+                disabled={unassignedUploadsLoading}
+                className="rounded-md border border-[#D3D1C7] bg-[#FAFAF8] px-3 py-1.5 text-[11px] font-semibold text-[#6b7280] hover:bg-[#ECEAE2] disabled:opacity-50"
+              >
+                {unassignedUploadsLoading ? <Loader2 size={11} className="animate-spin" /> : "↻"}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -2835,6 +3200,18 @@ export function FieldMapView() {
               {batchDone ? (batchWasStopped ? "Batch Stopped" : "Batch Complete") : "Batch Running…"}
             </span>
             <div className="flex items-center gap-2">
+              {activeBatchSiteName && (
+                <button
+                  type="button"
+                  onClick={() => void openSiteBuildingsPanel(activeBatchSiteName)}
+                  disabled={siteBuildingsPanelLoading}
+                  title="View all buildings in this site"
+                  className="inline-flex items-center gap-1 rounded border border-white/30 bg-white/15 px-2 py-0.5 text-[10px] font-semibold text-white hover:bg-white/25 disabled:opacity-50"
+                >
+                  {siteBuildingsPanelLoading ? <Loader2 size={10} className="animate-spin" /> : <LayoutList size={10} />}
+                  Site
+                </button>
+              )}
               {!batchDone && (
                 <button
                   type="button"
@@ -2852,11 +3229,17 @@ export function FieldMapView() {
                     batchStreamCleanupRef.current = null
                   }
                   setActiveBatchId(null)
+                  setActiveBatchSiteName("")
+                  setSiteBuildingsPanel(null)
                   setBatchProgress(null)
                   setBatchDone(false)
                   setBatchWasStopped(false)
                   setCurrentAiStage(null)
+                  setCurrentThinkingFull("")
+                  setCurrentResponseFull("")
+                  setAiThinkingExpanded(false)
                   setBatchBuildingProgress({})
+                  setBatchTokensUsed(0)
                   setProcessingOsmIds([])
                 }}
                 className="text-white/70 hover:text-white"
@@ -2882,14 +3265,46 @@ export function FieldMapView() {
               <span>{batchProgress.failed} failed</span>
               <span>of {batchProgress.total}</span>
             </div>
-            {/* Live AI stage indicator */}
+            {batchTokensUsed > 0 && (
+              <div className="mt-1 text-right text-[10px] text-[#6b7280]">
+                {batchTokensUsed >= 1000000
+                  ? `${(batchTokensUsed / 1000000).toFixed(1)}M`
+                  : batchTokensUsed >= 1000
+                  ? `${Math.round(batchTokensUsed / 1000)}k`
+                  : batchTokensUsed} tokens used
+              </div>
+            )}
+            {/* Live AI stage indicator — expandable */}
             {!batchDone && currentAiStage && (
-              <div className="mt-2 flex items-start gap-1.5 rounded-md bg-[#f0faf6] border border-[#c4e8d8] px-2 py-1.5">
-                <Loader2 size={11} className="mt-0.5 shrink-0 animate-spin text-[#0F6E56]" />
-                <div className="min-w-0">
-                  <div className="text-[10px] font-semibold uppercase text-[#0F6E56]">AI Thinking</div>
-                  <div className="text-[10px] text-[#17352b] leading-tight">{currentAiStage.thought}</div>
-                </div>
+              <div className="mt-2 rounded-md border border-[#c4e8d8] bg-[#f0faf6]">
+                <button
+                  type="button"
+                  onClick={() => setAiThinkingExpanded((v) => !v)}
+                  className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left"
+                >
+                  <Loader2 size={11} className="shrink-0 animate-spin text-[#0F6E56]" />
+                  <span className="text-[10px] font-semibold uppercase text-[#0F6E56]">AI Thinking</span>
+                  <span className="ml-auto text-[10px] text-[#0F6E56]">{aiThinkingExpanded ? "▾" : "▸"}</span>
+                </button>
+                {!aiThinkingExpanded && (
+                  <div className="truncate px-2 pb-1.5 text-[10px] leading-tight text-[#17352b]">{currentAiStage.thought}</div>
+                )}
+                {aiThinkingExpanded && (currentThinkingFull || currentResponseFull) && (
+                  <div className="max-h-64 overflow-y-auto border-t border-[#c4e8d8] px-2 py-1.5">
+                    {currentThinkingFull && (
+                      <pre className="whitespace-pre-wrap break-words text-[9px] leading-relaxed text-[#17352b]">{currentThinkingFull}</pre>
+                    )}
+                    {currentThinkingFull && currentResponseFull && (
+                      <div className="my-1 border-t border-[#c4e8d8]" />
+                    )}
+                    {currentResponseFull && (
+                      <pre className="whitespace-pre-wrap break-words text-[9px] leading-relaxed text-[#0F6E56]">{currentResponseFull}</pre>
+                    )}
+                  </div>
+                )}
+                {aiThinkingExpanded && !currentThinkingFull && !currentResponseFull && (
+                  <div className="px-2 pb-1.5 text-[10px] leading-tight text-[#17352b]">{currentAiStage.thought}</div>
+                )}
               </div>
             )}
             {Object.keys(batchBuildingProgress).length > 0 && (
@@ -2915,6 +3330,23 @@ export function FieldMapView() {
                         </div>
                         <div className="mt-1 text-[10px] text-[#0F6E56] uppercase">{item.stage.replaceAll("_", " ")}</div>
                         <div className="text-[10px] text-[#17352b] leading-tight">{item.thought}</div>
+                        {item.totalTokens != null && item.contextWindow != null && item.contextWindow > 0 && (
+                          <div className="mt-1.5">
+                            <div className="mb-0.5 flex justify-between text-[9px] text-[#6b7280]">
+                              <span>ctx usage</span>
+                              <span>{Math.round(item.totalTokens / 1000)}k / {Math.round(item.contextWindow / 1024)}k ({Math.min(100, Math.round((item.totalTokens / item.contextWindow) * 100))}%)</span>
+                            </div>
+                            <div className="h-1 w-full rounded-full bg-[#ECEAE2]">
+                              <div
+                                className={`h-1 rounded-full transition-all ${
+                                  item.totalTokens / item.contextWindow > 0.85 ? "bg-red-500" :
+                                  item.totalTokens / item.contextWindow > 0.6 ? "bg-yellow-500" : "bg-[#0F6E56]"
+                                }`}
+                                style={{ width: `${Math.min(100, Math.round((item.totalTokens / item.contextWindow) * 100))}%` }}
+                              />
+                            </div>
+                          </div>
+                        )}
                       </div>
                     ))}
                 </div>
@@ -2955,6 +3387,121 @@ export function FieldMapView() {
                 </div>
               ))}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Site Buildings Panel — shown when user clicks "Site" in batch panel */}
+      {siteBuildingsPanel && (
+        <div
+          className="absolute z-30 flex flex-col rounded-lg border border-[#D3D1C7] bg-white shadow-xl"
+          style={{
+            top: "1rem",
+            right: activeBatchId && batchProgress ? "20rem" : "1rem",
+            width: "22rem",
+            maxHeight: "calc(100vh - 2rem)",
+          }}
+        >
+          {/* Header */}
+          <div className="flex shrink-0 items-center justify-between rounded-t-lg bg-[#0F6E56] px-3 py-2">
+            <div className="min-w-0">
+              <div className="truncate text-sm font-bold text-white">{siteBuildingsPanel.site_name}</div>
+              <div className="text-[10px] text-white/70">
+                {siteBuildingsPanel.assessed}/{siteBuildingsPanel.total} buildings assessed
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSiteBuildingsPanel(null)}
+              className="ml-2 shrink-0 text-white/70 hover:text-white"
+            >
+              <X size={16} />
+            </button>
+          </div>
+
+          {/* Progress bar */}
+          <div className="shrink-0 border-b border-[#D3D1C7] px-3 py-2">
+            <div className="mb-1 h-1.5 w-full rounded-full bg-[#ECEAE2]">
+              <div
+                className="h-1.5 rounded-full bg-[#0F6E56] transition-all"
+                style={{
+                  width: siteBuildingsPanel.total > 0
+                    ? `${Math.round((siteBuildingsPanel.assessed / siteBuildingsPanel.total) * 100)}%`
+                    : "0%",
+                }}
+              />
+            </div>
+            <div className="flex justify-between text-[10px] text-[#6b7280]">
+              <span>{siteBuildingsPanel.assessed} assessed</span>
+              <span>{siteBuildingsPanel.total - siteBuildingsPanel.assessed} pending</span>
+              <span>{siteBuildingsPanel.total} total</span>
+            </div>
+          </div>
+
+          {/* Building list */}
+          <div className="flex-1 overflow-y-auto">
+            {siteBuildingsPanel.buildings.length === 0 ? (
+              <div className="px-3 py-4 text-center text-xs text-[#6b7280]">No buildings found in site boundary.</div>
+            ) : (
+              <div className="divide-y divide-[#F3F1E9]">
+                {siteBuildingsPanel.buildings.map((bldg) => {
+                  const sev = bldg.severity
+                  const sevClasses = getSeverityClasses(sev ?? 0)
+                  const assessed = bldg.assessment_id !== null
+                  return (
+                    <button
+                      key={bldg.osm_id}
+                      type="button"
+                      className="flex w-full items-start gap-2 px-3 py-2 text-left hover:bg-[#F9F9F7]"
+                      onClick={() => {
+                        const map = mapInstanceRef.current
+                        if (map) map.flyTo({ center: [bldg.centroid_lon, bldg.centroid_lat], zoom: 18, duration: 800 })
+                      }}
+                      title={`OSM:${bldg.osm_id} — click to fly to`}
+                    >
+                      {/* severity dot */}
+                      <span
+                        className={`mt-0.5 inline-block h-2.5 w-2.5 shrink-0 rounded-full ${assessed ? sevClasses.dot : "bg-[#D3D1C7]"}`}
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center justify-between gap-1">
+                          <span className="text-xs font-semibold text-[#17352b]">OSM:{bldg.osm_id}</span>
+                          {assessed && sev != null && (
+                            <span className={`shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-semibold ${sevClasses.badge}`}>
+                              S{sev}
+                            </span>
+                          )}
+                          {!assessed && (
+                            <span className="shrink-0 rounded border border-[#D3D1C7] px-1.5 py-0.5 text-[10px] text-[#6b7280]">
+                              pending
+                            </span>
+                          )}
+                        </div>
+                        {bldg.damage_type && (
+                          <div className="text-[10px] capitalize text-[#6b7280]">{bldg.damage_type.replaceAll("_", " ")}</div>
+                        )}
+                        {bldg.assessment_id && (
+                          <div className="text-[10px] text-[#9a9a8e]">{bldg.assessment_id}</div>
+                        )}
+                      </div>
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Footer: refresh */}
+          <div className="shrink-0 border-t border-[#D3D1C7] px-3 py-2">
+            <button
+              type="button"
+              onClick={() => void openSiteBuildingsPanel(siteBuildingsPanel.site_name)}
+              disabled={siteBuildingsPanelLoading}
+              className="flex w-full items-center justify-center gap-1.5 rounded-md border border-[#D3D1C7] bg-[#FAFAF8] py-1.5 text-[11px] font-semibold text-[#0F6E56] hover:bg-[#E1F5EE] disabled:opacity-50"
+            >
+              {siteBuildingsPanelLoading ? <Loader2 size={11} className="animate-spin" /> : null}
+              Refresh
+            </button>
           </div>
         </div>
       )}

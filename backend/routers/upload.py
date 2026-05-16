@@ -677,14 +677,9 @@ async def upload_video(
         if len(file_bytes) > MAX_VIDEO_SIZE_BYTES:
             return _error(f"Video exceeds {MAX_VIDEO_SIZE_MB} MB limit")
 
-        duplicate_row = await _find_duplicate_upload(
-            file_bytes=file_bytes,
-            file_type="video",
-            file_size_bytes=len(file_bytes),
-        )
-        if duplicate_row is not None:
-            return _duplicate_ignored_response(duplicate_row, "video", file.filename)
-
+        # Videos are intentional field recordings — skip byte-level deduplication so
+        # every upload always creates its own record (even if the same file was uploaded
+        # before under a different name or for a different location).
         upload_id = _generate_upload_id()
         relative_path, absolute_path = await _save_file(file_bytes, FOLDER_MAP["video"], ext, upload_id)
         # This variable stores probed video length used for upload policy enforcement.

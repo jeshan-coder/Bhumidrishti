@@ -176,6 +176,95 @@ export async function analyzeExistingBatch(batchId: string): Promise<{ source_ba
   return json.data
 }
 
+// ── Site-buildings API ────────────────────────────────────────────────────────
+
+export interface SiteRecord {
+  id: number
+  name: string
+  status: string
+  total_buildings: number
+  assessed_count: number
+  critical_count: number
+  boundary: unknown | null
+  created_at: string | null
+  updated_at: string | null
+}
+
+export interface SiteBuilding {
+  osm_id: number
+  centroid_lat: number
+  centroid_lon: number
+  area_m2: number
+  polygon: unknown | null
+  assessment_id: string | null
+  severity: number | null
+  damage_type: string | null
+  structural_risk: string | null
+  assessment_status: string | null
+  input_type: string | null
+  confidence: number | null
+  recommended_action: string | null
+  assessed_at: string | null
+}
+
+export interface SiteBuildingsResult {
+  site_id: number
+  site_name: string
+  site_status: string
+  total: number
+  assessed: number
+  buildings: SiteBuilding[]
+}
+
+export interface UnassignedUpload {
+  id: string
+  file_type: "ground_photo" | "video"
+  lat: number
+  lon: number
+  filename: string
+  uploaded_at: string | null
+  worker_name: string | null
+  nearby_osm_id: number | null
+}
+
+export interface UnassignedUploadsResult {
+  count: number
+  uploads: UnassignedUpload[]
+}
+
+export async function fetchUnassignedUploads(): Promise<UnassignedUploadsResult> {
+  try {
+    const res = await fetch(`${API_BASE}/batch/unassigned-uploads`)
+    const json = await res.json()
+    if (!json.success) return { count: 0, uploads: [] }
+    return json.data as UnassignedUploadsResult
+  } catch {
+    return { count: 0, uploads: [] }
+  }
+}
+
+export async function fetchSitesFull(): Promise<SiteRecord[]> {
+  try {
+    const res = await fetch(`${API_BASE}/batch/sites-full`)
+    const json = await res.json()
+    if (!json.success) return []
+    return json.data as SiteRecord[]
+  } catch {
+    return []
+  }
+}
+
+export async function fetchSiteBuildings(siteId: number, limit = 2000): Promise<SiteBuildingsResult | null> {
+  try {
+    const res = await fetch(`${API_BASE}/batch/sites/${siteId}/buildings?limit=${limit}`)
+    const json = await res.json()
+    if (!json.success) return null
+    return json.data as SiteBuildingsResult
+  } catch {
+    return null
+  }
+}
+
 // ── SSE stream ────────────────────────────────────────────────────────────────
 
 /**

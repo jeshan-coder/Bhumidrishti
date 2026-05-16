@@ -19,12 +19,20 @@ type ModelHealthResponse = {
   data?: {
     model?: string
     model_available?: boolean
+    context_window?: number
   }
   error?: string | null
 }
 
+function formatContextWindow(tokens: number | undefined): string {
+  if (!tokens) return ""
+  if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(0)}M ctx`
+  if (tokens >= 1000) return `${Math.round(tokens / 1024)}k ctx`
+  return `${tokens} ctx`
+}
+
 // This function checks backend health endpoint for Gemma model availability.
-async function getNavbarModelStatus(): Promise<{ label: string; className: string }> {
+async function getNavbarModelStatus(): Promise<{ label: string; ctx: string; className: string }> {
   try {
     const response = await fetch(`${BACKEND_API_URL}/health/model`, {
       cache: "no-store",
@@ -33,6 +41,7 @@ async function getNavbarModelStatus(): Promise<{ label: string; className: strin
     if (!response.ok) {
       return {
         label: "Gemma 4 - backend down",
+        ctx: "",
         className: "border-[#A32D2D] bg-[#A32D2D] text-white",
       }
     }
@@ -40,21 +49,25 @@ async function getNavbarModelStatus(): Promise<{ label: string; className: strin
     const payload = (await response.json()) as ModelHealthResponse
     const activeModel = payload.data?.model ?? "Gemma 4"
     const isAvailable = payload.success && Boolean(payload.data?.model_available)
+    const ctx = formatContextWindow(payload.data?.context_window)
 
     if (isAvailable) {
       return {
-        label: `${activeModel} - online`,
+        label: `${activeModel} — online`,
+        ctx,
         className: "border-[#0b5f4b] bg-[#0c614d] text-[#E1F5EE]",
       }
     }
 
     return {
-      label: "Gemma 4 - model missing",
+      label: "Gemma 4 — model missing",
+      ctx,
       className: "border-[#EF9F27] bg-[#EF9F27] text-white",
     }
   } catch {
     return {
-      label: "Gemma 4 - backend down",
+      label: "Gemma 4 — backend down",
+      ctx: "",
       className: "border-[#A32D2D] bg-[#A32D2D] text-white",
     }
   }
@@ -90,10 +103,17 @@ export async function AppNavbar() {
           >
             New Assessment
           </Link>
-          <div
-            className={`rounded-full border px-2.5 py-1 text-[10px] font-medium sm:text-xs ${modelStatus.className}`}
-          >
-            {modelStatus.label}
+          <div className="flex items-center gap-1.5">
+            <div
+              className={`rounded-full border px-2.5 py-1 text-[10px] font-medium sm:text-xs ${modelStatus.className}`}
+            >
+              {modelStatus.label}
+            </div>
+            {modelStatus.ctx && (
+              <div className="rounded-full border border-white/20 bg-white/10 px-2 py-1 text-[10px] font-medium text-white/80">
+                {modelStatus.ctx}
+              </div>
+            )}
           </div>
         </div>
       </nav>

@@ -4,7 +4,7 @@ import os
 from typing import Any
 from fastapi import APIRouter
 from ollama import AsyncClient
-from services.ai_runtime import ACTIVE_GEMMA_MODEL
+from services.ai_runtime import ACTIVE_GEMMA_MODEL, get_model_context_window
 
 router = APIRouter(prefix="", tags=["health"])
 
@@ -59,6 +59,7 @@ async def model_health() -> dict[str, Any]:
                 "model": MODEL_NAME,
                 "model_available": model_available,
                 "loaded_models": model_names,
+                "context_window": get_model_context_window(MODEL_NAME),
             },
             "error": None,
         }
@@ -70,6 +71,7 @@ async def model_health() -> dict[str, Any]:
                 "model": MODEL_NAME,
                 "model_available": False,
                 "loaded_models": [],
+                "context_window": get_model_context_window(MODEL_NAME),
             },
             "error": f"Model health check failed: {exc}",
         }

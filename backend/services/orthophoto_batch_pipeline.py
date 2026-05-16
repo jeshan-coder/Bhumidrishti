@@ -17,7 +17,7 @@ from services.chip_extractor import (
 )
 from services.gemma_pipeline import run_assessment_agent
 from services.gis import query_location_info_by_point
-from services.pipeline_worker import save_ai_assessment
+from services.pipeline_worker import save_ai_assessment, _select_and_prepare_video_frames
 
 logger = logging.getLogger(__name__)
 
@@ -277,21 +277,136 @@ async def _fail_batch(
         )
 
 
-async def _check_existing_assessment(pool, osm_id: int, force_reanalyze: bool) -> str | None:
-    """Return existing assessment id if building was already assessed, else None."""
+async def _check_existing_assessment(
+    pool,
+    osm_id: int,
+    force_reanalyze: bool,
+    *,
+    input_type_filter: list[str] | None = None,
+) -> str | None:
+    """Return existing assessment id if building was already assessed, else None.
+
+    When input_type_filter is given only assessments of those types are considered.
+    This lets us check "has this building already been assessed via ground_photo?"
+    independently of orthophoto assessments.
+    """
     if force_reanalyze:
         return None
+
+    type_clause = ""
+    args: list = [osm_id]
+    if input_type_filter:
+        placeholders = ", ".join(f"${i + 2}" for i in range(len(input_type_filter)))
+        type_clause = f"AND input_type IN ({placeholders})"
+        args.extend(input_type_filter)
+
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            """
+            f"""
             SELECT id FROM assessments
              WHERE osm_building_id = $1
                AND status NOT IN ('false_positive')
+               {type_clause}
              LIMIT 1
             """,
-            osm_id,
+            *args,
         )
     return str(row["id"]) if row else None
+
+
+async def _lookup_ground_data_for_building(
+    pool,
+    osm_id: int,
+    centroid_lat: float,
+    centroid_lon: float,
+    radius_m: float = 30.0,
+) -> dict[str, Any] | None:
+    """Return ground photo or video data for a building if any exists.
+
+    Checks two sources in order:
+    1. assessments table — already-analysed ground_photo / video records
+    2. uploads table — unanalysed raw uploads (is_analyzed = false) within radius
+
+    Priority order: ground_photo > video.
+    Returns a dict with keys: input_type, photo_paths (list), or None.
+    """
+    async with pool.acquire() as conn:
+        # Source 1: existing assessments (analysed ground data).
+        assessed_rows = await conn.fetch(
+            """
+            SELECT input_type, photo_path
+              FROM assessments
+             WHERE (
+                     osm_building_id = $1
+                     OR (
+                         geom IS NOT NULL
+                         AND ST_DWithin(
+                             geom::geography,
+                             ST_SetSRID(ST_MakePoint($2, $3), 4326)::geography,
+                             $4
+                         )
+                     )
+                   )
+               AND input_type IN ('ground_photo', 'video')
+               AND status NOT IN ('false_positive')
+               AND photo_path IS NOT NULL
+             ORDER BY
+                 CASE WHEN input_type = 'ground_photo' THEN 1 ELSE 2 END,
+                 created_at DESC
+            """,
+            osm_id,
+            centroid_lon,
+            centroid_lat,
+            radius_m,
+        )
+
+        # Source 2: raw uploads not yet analysed (is_analyzed = false).
+        upload_rows = await conn.fetch(
+            """
+            SELECT
+                file_type AS input_type,
+                saved_path AS photo_path
+            FROM uploads
+            WHERE file_type IN ('ground_photo', 'video')
+              AND is_analyzed = false
+              AND lat IS NOT NULL
+              AND lon IS NOT NULL
+              AND ST_DWithin(
+                  ST_SetSRID(ST_MakePoint(lon, lat), 4326)::geography,
+                  ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography,
+                  $3
+              )
+            ORDER BY
+                CASE WHEN file_type = 'ground_photo' THEN 1 ELSE 2 END,
+                uploaded_at DESC
+            """,
+            centroid_lon,
+            centroid_lat,
+            radius_m,
+        )
+
+    # Merge: assessed data takes precedence over raw uploads.
+    all_rows = list(assessed_rows) + list(upload_rows)
+
+    if not all_rows:
+        return None
+
+    # Ground photos (from either source) take priority.
+    ground_paths: list[str] = [
+        str(r["photo_path"]) for r in all_rows
+        if r["input_type"] == "ground_photo" and r["photo_path"]
+    ]
+    if ground_paths:
+        return {"input_type": "ground_photo", "photo_paths": ground_paths}
+
+    video_row = next(
+        (r for r in all_rows if r["input_type"] == "video" and r["photo_path"]),
+        None,
+    )
+    if video_row:
+        return {"input_type": "video", "photo_paths": [str(video_row["photo_path"])]}
+
+    return None
 
 
 async def _get_cog_path_for_upload(pool, upload_id: str) -> str | None:
@@ -450,8 +565,24 @@ async def run_orthophoto_batch(
                 "status": "clipping",
             })
 
+            # ── Check for ground-level data (ground_photo > video > orthophoto) ──
+            ground_data = await _lookup_ground_data_for_building(
+                pool, osm_id, centroid_lat, centroid_lon
+            )
+            effective_input_type = ground_data["input_type"] if ground_data else "orthophoto"
+
             # ── Deduplicate check ──────────────────────────────────────────────
-            existing_id = await _check_existing_assessment(pool, osm_id, force_reanalyze)
+            # When ground data exists, only skip if a ground/video assessment
+            # already exists for this building. An orthophoto-only assessment is
+            # not sufficient — we still want to re-analyse with better data.
+            if ground_data:
+                existing_id = await _check_existing_assessment(
+                    pool, osm_id, force_reanalyze,
+                    input_type_filter=["ground_photo", "video"],
+                )
+            else:
+                existing_id = await _check_existing_assessment(pool, osm_id, force_reanalyze)
+
             if existing_id:
                 skipped += 1
                 await _update_batch_progress(pool, batch_id, processed, failed, skipped)
@@ -464,6 +595,286 @@ async def run_orthophoto_batch(
                     "status": "skipped",
                 })
                 continue
+
+            # ── Shared SSE progress callback ───────────────────────────────────
+            async def _ai_progress(event: dict[str, Any]) -> None:
+                stream_thinking = event.get("thinking_text")
+                stream_response = event.get("response_text")
+                stage = event.get("stage")
+                thought = event.get("thought")
+                if stage == "ai_reasoning_stream" and isinstance(stream_thinking, str) and stream_thinking.strip():
+                    thought = stream_thinking[-480:]
+                elif stage == "ai_response_stream" and isinstance(stream_response, str) and stream_response.strip():
+                    thought = stream_response[-480:]
+                await _push_event(batch_id, {
+                    "type": "building_ai_stage",
+                    "batch_id": batch_id,
+                    "osm_id": osm_id,
+                    "stage": stage,
+                    "thought": thought,
+                    "thinking_text": stream_thinking,
+                    "response_text": stream_response,
+                    "progress_percent": event.get("progress_percent"),
+                })
+
+            # ══════════════════════════════════════════════════════════════════
+            # PATH A — ground photo: use field photos directly, skip chip work
+            # ══════════════════════════════════════════════════════════════════
+            if effective_input_type == "ground_photo":
+                logger.info(
+                    "batch_ground_photo_priority batch_id=%s osm_id=%s photos=%d",
+                    batch_id, osm_id, len(ground_data["photo_paths"]),
+                )
+                # Resolve relative DB paths to absolute filesystem paths.
+                abs_photo_paths = [
+                    str(UPLOAD_ROOT.parent / p)
+                    for p in ground_data["photo_paths"]
+                    if p and (UPLOAD_ROOT.parent / p).exists()
+                ]
+                if not abs_photo_paths:
+                    failed += 1
+                    await _update_batch_progress(pool, batch_id, processed, failed, skipped)
+                    await _push_event(batch_id, {
+                        "type": "building_failed",
+                        "batch_id": batch_id,
+                        "osm_id": osm_id,
+                        "error": "ground_photo_files_missing",
+                        "status": "failed",
+                    })
+                    continue
+
+                await _push_event(batch_id, {
+                    "type": "building_analyzing",
+                    "batch_id": batch_id,
+                    "osm_id": osm_id,
+                    "status": "analyzing",
+                    "data_source": "ground_photo",
+                    "photo_count": len(abs_photo_paths),
+                })
+
+                try:
+                    assessment_data = await run_assessment_agent(
+                        image_paths=abs_photo_paths,
+                        lat=centroid_lat,
+                        lon=centroid_lon,
+                        input_type="ground_photo",
+                        db=pool,
+                        field_note=None,
+                        progress_callback=_ai_progress,
+                    )
+                except Exception as exc:
+                    failed += 1
+                    await _update_batch_progress(pool, batch_id, processed, failed, skipped)
+                    await _push_event(batch_id, {
+                        "type": "building_failed",
+                        "batch_id": batch_id,
+                        "osm_id": osm_id,
+                        "error": f"ai_error: {exc}",
+                        "status": "failed",
+                    })
+                    logger.exception("batch_ai_failed_ground_photo osm_id=%s", osm_id)
+                    continue
+
+                save_photo_path = ground_data["photo_paths"][0]  # representative path
+                try:
+                    assessment_id = await save_ai_assessment(
+                        pool=pool,
+                        lat=centroid_lat,
+                        lon=centroid_lon,
+                        input_type="ground_photo",
+                        photo_path=save_photo_path,
+                        field_note=None,
+                        assessment_data=assessment_data,
+                        extra_fields={
+                            "osm_building_id": osm_id,
+                            "batch_id": batch_id,
+                            "site_id": site_id,
+                            "site_name": site_name,
+                        },
+                    )
+                except Exception as exc:
+                    failed += 1
+                    await _update_batch_progress(pool, batch_id, processed, failed, skipped)
+                    await _push_event(batch_id, {
+                        "type": "building_failed",
+                        "batch_id": batch_id,
+                        "osm_id": osm_id,
+                        "error": f"save_error: {exc}",
+                        "status": "failed",
+                    })
+                    logger.exception("batch_save_failed_ground_photo osm_id=%s", osm_id)
+                    continue
+
+                processed += 1
+                await _update_batch_progress(pool, batch_id, processed, failed, skipped)
+                await _push_event(batch_id, {
+                    "type": "building_done",
+                    "batch_id": batch_id,
+                    "osm_id": osm_id,
+                    "assessment_id": assessment_id,
+                    "severity": assessment_data.get("severity"),
+                    "damage_type": assessment_data.get("damage_type"),
+                    "lat": centroid_lat,
+                    "lon": centroid_lon,
+                    "confidence": assessment_data.get("confidence"),
+                    "data_source": "ground_photo",
+                    "status": "done",
+                    "prompt_tokens": assessment_data.get("prompt_tokens"),
+                    "completion_tokens": assessment_data.get("completion_tokens"),
+                    "total_tokens": assessment_data.get("total_tokens"),
+                    "context_window": assessment_data.get("context_window"),
+                    "inference_seconds": assessment_data.get("inference_seconds"),
+                })
+                logger.info(
+                    "batch_building_done batch_id=%s osm_id=%s assessment_id=%s severity=%s source=ground_photo",
+                    batch_id, osm_id, assessment_id, assessment_data.get("severity"),
+                )
+                continue
+
+            # ══════════════════════════════════════════════════════════════════
+            # PATH B — video: extract frames then assess
+            # ══════════════════════════════════════════════════════════════════
+            if effective_input_type == "video":
+                video_rel_path = ground_data["photo_paths"][0]
+                abs_video_path = str(UPLOAD_ROOT.parent / video_rel_path)
+                logger.info(
+                    "batch_video_priority batch_id=%s osm_id=%s video=%s",
+                    batch_id, osm_id, abs_video_path,
+                )
+
+                if not Path(abs_video_path).exists():
+                    failed += 1
+                    await _update_batch_progress(pool, batch_id, processed, failed, skipped)
+                    await _push_event(batch_id, {
+                        "type": "building_failed",
+                        "batch_id": batch_id,
+                        "osm_id": osm_id,
+                        "error": "video_file_missing",
+                        "status": "failed",
+                    })
+                    continue
+
+                await _push_event(batch_id, {
+                    "type": "building_analyzing",
+                    "batch_id": batch_id,
+                    "osm_id": osm_id,
+                    "status": "analyzing",
+                    "data_source": "video",
+                })
+
+                try:
+                    video_upload_id = f"batch_{batch_id}_osm_{osm_id}"
+                    frame_paths = await asyncio.to_thread(
+                        _select_and_prepare_video_frames,
+                        abs_video_path,
+                        video_upload_id,
+                    )
+                except Exception as exc:
+                    failed += 1
+                    await _update_batch_progress(pool, batch_id, processed, failed, skipped)
+                    await _push_event(batch_id, {
+                        "type": "building_failed",
+                        "batch_id": batch_id,
+                        "osm_id": osm_id,
+                        "error": f"video_frame_extract_error: {exc}",
+                        "status": "failed",
+                    })
+                    logger.exception("batch_video_frame_extract_failed osm_id=%s", osm_id)
+                    continue
+
+                if not frame_paths:
+                    failed += 1
+                    await _update_batch_progress(pool, batch_id, processed, failed, skipped)
+                    await _push_event(batch_id, {
+                        "type": "building_failed",
+                        "batch_id": batch_id,
+                        "osm_id": osm_id,
+                        "error": "video_no_frames_extracted",
+                        "status": "failed",
+                    })
+                    continue
+
+                try:
+                    assessment_data = await run_assessment_agent(
+                        image_paths=frame_paths,
+                        lat=centroid_lat,
+                        lon=centroid_lon,
+                        input_type="video",
+                        db=pool,
+                        field_note=None,
+                        progress_callback=_ai_progress,
+                    )
+                except Exception as exc:
+                    failed += 1
+                    await _update_batch_progress(pool, batch_id, processed, failed, skipped)
+                    await _push_event(batch_id, {
+                        "type": "building_failed",
+                        "batch_id": batch_id,
+                        "osm_id": osm_id,
+                        "error": f"ai_error: {exc}",
+                        "status": "failed",
+                    })
+                    logger.exception("batch_ai_failed_video osm_id=%s", osm_id)
+                    continue
+
+                try:
+                    assessment_id = await save_ai_assessment(
+                        pool=pool,
+                        lat=centroid_lat,
+                        lon=centroid_lon,
+                        input_type="video",
+                        photo_path=video_rel_path,
+                        field_note=None,
+                        assessment_data=assessment_data,
+                        extra_fields={
+                            "osm_building_id": osm_id,
+                            "batch_id": batch_id,
+                            "site_id": site_id,
+                            "site_name": site_name,
+                        },
+                    )
+                except Exception as exc:
+                    failed += 1
+                    await _update_batch_progress(pool, batch_id, processed, failed, skipped)
+                    await _push_event(batch_id, {
+                        "type": "building_failed",
+                        "batch_id": batch_id,
+                        "osm_id": osm_id,
+                        "error": f"save_error: {exc}",
+                        "status": "failed",
+                    })
+                    logger.exception("batch_save_failed_video osm_id=%s", osm_id)
+                    continue
+
+                processed += 1
+                await _update_batch_progress(pool, batch_id, processed, failed, skipped)
+                await _push_event(batch_id, {
+                    "type": "building_done",
+                    "batch_id": batch_id,
+                    "osm_id": osm_id,
+                    "assessment_id": assessment_id,
+                    "severity": assessment_data.get("severity"),
+                    "damage_type": assessment_data.get("damage_type"),
+                    "lat": centroid_lat,
+                    "lon": centroid_lon,
+                    "confidence": assessment_data.get("confidence"),
+                    "data_source": "video",
+                    "status": "done",
+                    "prompt_tokens": assessment_data.get("prompt_tokens"),
+                    "completion_tokens": assessment_data.get("completion_tokens"),
+                    "total_tokens": assessment_data.get("total_tokens"),
+                    "context_window": assessment_data.get("context_window"),
+                    "inference_seconds": assessment_data.get("inference_seconds"),
+                })
+                logger.info(
+                    "batch_building_done batch_id=%s osm_id=%s assessment_id=%s severity=%s source=video",
+                    batch_id, osm_id, assessment_id, assessment_data.get("severity"),
+                )
+                continue
+
+            # ══════════════════════════════════════════════════════════════════
+            # PATH C — orthophoto (default): chip extraction → AI analysis
+            # ══════════════════════════════════════════════════════════════════
 
             # ── Chip extraction ────────────────────────────────────────────────
             await _push_event(batch_id, {
@@ -495,7 +906,7 @@ async def run_orthophoto_batch(
                     extract_building_chips,
                     post_cog_path,
                     pre_cog_path,
-                    polygon_geojson,   # pass actual geometry (Polygon or MultiPolygon)
+                    polygon_geojson,
                     osm_id,
                     batch_id,
                     chips_dir,
@@ -545,9 +956,7 @@ async def run_orthophoto_batch(
             if pre_available_for_ai and pre_post_overlap_pct < 80.0:
                 logger.warning(
                     "batch_pre_post_alignment_low_overlap batch_id=%s osm_id=%s overlap_pct=%.2f action=post_only",
-                    batch_id,
-                    osm_id,
-                    pre_post_overlap_pct,
+                    batch_id, osm_id, pre_post_overlap_pct,
                 )
                 chip_meta_warnings = chip_meta.get("warnings") or []
                 if "pre_post_low_overlap" not in chip_meta_warnings:
@@ -561,6 +970,7 @@ async def run_orthophoto_batch(
                 "batch_id": batch_id,
                 "osm_id": osm_id,
                 "status": "analyzing",
+                "data_source": "orthophoto",
                 "pre_available": pre_available_for_ai,
                 "post_available": True,
                 "pre_post_overlap_pct": round(pre_post_overlap_pct, 2),
@@ -574,27 +984,6 @@ async def run_orthophoto_batch(
             area_m2 = float(row["area_m2"] or chip_meta["area_m2"])
             width_m = chip_meta["width_m"]
             height_m = chip_meta["height_m"]
-
-            # Build a progress callback so AI stages stream as SSE events.
-            async def _ai_progress(event: dict[str, Any]) -> None:
-                stream_thinking = event.get("thinking_text")
-                stream_response = event.get("response_text")
-                stage = event.get("stage")
-                thought = event.get("thought")
-                if stage == "ai_reasoning_stream" and isinstance(stream_thinking, str) and stream_thinking.strip():
-                    thought = stream_thinking[-480:]
-                elif stage == "ai_response_stream" and isinstance(stream_response, str) and stream_response.strip():
-                    thought = stream_response[-480:]
-                await _push_event(batch_id, {
-                    "type": "building_ai_stage",
-                    "batch_id": batch_id,
-                    "osm_id": osm_id,
-                    "stage": stage,
-                    "thought": thought,
-                    "thinking_text": stream_thinking,
-                    "response_text": stream_response,
-                    "progress_percent": event.get("progress_percent"),
-                })
 
             try:
                 assessment_data = await run_assessment_agent(
@@ -692,15 +1081,18 @@ async def run_orthophoto_batch(
                 "confidence": assessment_data.get("confidence"),
                 "chip_path": chip_meta["post_chip_path"],
                 "pre_chip_path": chip_meta["pre_chip_path"] if pre_available_for_ai else None,
+                "data_source": "orthophoto",
                 "status": "done",
+                "prompt_tokens": assessment_data.get("prompt_tokens"),
+                "completion_tokens": assessment_data.get("completion_tokens"),
+                "total_tokens": assessment_data.get("total_tokens"),
+                "context_window": assessment_data.get("context_window"),
+                "inference_seconds": assessment_data.get("inference_seconds"),
             })
 
             logger.info(
-                "batch_building_done batch_id=%s osm_id=%s assessment_id=%s severity=%s",
-                batch_id,
-                osm_id,
-                assessment_id,
-                assessment_data.get("severity"),
+                "batch_building_done batch_id=%s osm_id=%s assessment_id=%s severity=%s source=orthophoto",
+                batch_id, osm_id, assessment_id, assessment_data.get("severity"),
             )
 
         # ── Finalize batch ────────────────────────────────────────────────────

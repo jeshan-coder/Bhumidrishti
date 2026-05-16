@@ -13,7 +13,7 @@ from prompts.gemma_system_prompt import (
     ORTHOPHOTO_ASSESSMENT_SYSTEM_PROMPT,
     PHOTO_ASSESSMENT_SYSTEM_PROMPT,
 )
-from services.ai_runtime import ACTIVE_GEMMA_MODEL
+from services.ai_runtime import ACTIVE_GEMMA_MODEL, get_model_context_window
 from services.gis import query_osrm_route  # still used by get_nearest_shelter (via tools)
 
 # =============================================================
@@ -28,6 +28,24 @@ ORTHOPHOTO_SYSTEM_PROMPT = ORTHOPHOTO_ASSESSMENT_SYSTEM_PROMPT
 
 # This variable stores the module logger used for pipeline debugging.
 logger = logging.getLogger(__name__)
+
+def get_num_ctx(model: str) -> int:
+    """Return the appropriate num_ctx for a given model name."""
+    return get_model_context_window(model)
+
+
+def _strip_nulls(obj: Any) -> Any:
+    """Recursively remove None/null values from dicts and lists.
+
+    Reduces token count of tool results sent back to the model — large tool
+    responses (e.g. get_location_info) contain dozens of null fields that
+    consume context window without providing any useful information.
+    """
+    if isinstance(obj, dict):
+        return {k: _strip_nulls(v) for k, v in obj.items() if v is not None}
+    if isinstance(obj, list):
+        return [_strip_nulls(item) for item in obj if item is not None]
+    return obj
 
 
 def _safe_json(data: Any) -> str:
@@ -69,7 +87,7 @@ def request_assessment_json_repair(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": repair_instruction},
         ],
-        options={"temperature": 0.0, "num_ctx": 8192},
+        options={"temperature": 0.0, "num_ctx": get_num_ctx(model)},
     )
 
     return repair_response.message.content or ""
@@ -434,7 +452,7 @@ async def run_assessment_agent(
                 model=model,
                 messages=messages,
                 tools=TOOLS,
-                options={"temperature": 0.1, "num_ctx": 8192},
+                options={"temperature": 0.1, "num_ctx": get_num_ctx(model)},
                 stream=True,
             )
         except Exception as exc:
@@ -454,12 +472,27 @@ async def run_assessment_agent(
         assistant_tool_calls: list[dict[str, Any]] = []
         emitted_thinking_chars = 0
         emitted_response_chars = 0
+        # Token counts — populated from the final stream chunk.
+        prompt_tokens: int = 0
+        completion_tokens: int = 0
+        # "length" means Ollama stopped because context window was exhausted.
+        # "stop" means the model finished naturally.
+        done_reason: str = ""
 
         for chunk in response_stream:
             if isinstance(chunk, dict):
                 message_block = chunk.get("message")
+                # Final stream chunk carries usage stats — accumulate across iterations.
+                prompt_tokens += chunk.get("prompt_eval_count", 0) or 0
+                completion_tokens += chunk.get("eval_count", 0) or 0
+                if chunk.get("done"):
+                    done_reason = chunk.get("done_reason", "") or ""
             else:
                 message_block = getattr(chunk, "message", None)
+                prompt_tokens += getattr(chunk, "prompt_eval_count", 0) or 0
+                completion_tokens += getattr(chunk, "eval_count", 0) or 0
+                if getattr(chunk, "done", False):
+                    done_reason = getattr(chunk, "done_reason", "") or ""
 
             if message_block is None:
                 continue
@@ -628,7 +661,7 @@ async def run_assessment_agent(
                 )
                 messages.append({
                     "role": "tool",
-                    "content": json.dumps(tool_result, ensure_ascii=False)
+                    "content": json.dumps(_strip_nulls(tool_result), ensure_ascii=False)
                 })
 
             _log_agent_event(
@@ -649,6 +682,33 @@ async def run_assessment_agent(
                     "thought": (assistant_content or assistant_thinking or "AI is finalizing structured assessment output.")[-480:],
                 }
             )
+
+        # Detect context window exhaustion — Ollama reports "length" when the
+        # response was cut short because num_ctx was reached.
+        context_window_full = done_reason == "length"
+        if context_window_full:
+            _log_agent_event(
+                "assessment_context_window_full",
+                {
+                    "iteration": iteration,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "context_window": get_num_ctx(model),
+                    "done_reason": done_reason,
+                },
+            )
+            if progress_callback:
+                await progress_callback(
+                    {
+                        "stage": "context_window_full",
+                        "progress_percent": 0,
+                        "thought": (
+                            f"Context window full ({get_num_ctx(model) // 1024}k tokens). "
+                            "The model ran out of space before finishing its response. "
+                            "Try a model with a larger context window."
+                        ),
+                    }
+                )
 
         raw_assistant_content = assistant_content or ""
         try:
@@ -697,6 +757,20 @@ async def run_assessment_agent(
                 )
                 raise parse_exc
 
+        elapsed_s = round(time.perf_counter() - assessment_started_at, 2)
+        parsed_assessment["inference_seconds"] = elapsed_s
+        parsed_assessment["model_used"] = model
+        parsed_assessment["prompt_tokens"] = prompt_tokens
+        parsed_assessment["completion_tokens"] = completion_tokens
+        parsed_assessment["total_tokens"] = prompt_tokens + completion_tokens
+        parsed_assessment["context_window"] = get_num_ctx(model)
+
+        if context_window_full:
+            existing_warnings = parsed_assessment.get("warnings") or []
+            if isinstance(existing_warnings, list) and "context_window_full" not in existing_warnings:
+                existing_warnings.append("context_window_full")
+            parsed_assessment["warnings"] = existing_warnings
+
         _log_agent_event(
             "assessment_completed",
             {
@@ -705,7 +779,9 @@ async def run_assessment_agent(
                 "damage_type": parsed_assessment.get("damage_type"),
                 "recommended_action": parsed_assessment.get("recommended_action"),
                 "confidence": parsed_assessment.get("confidence"),
-                "elapsed_ms_total": round((time.perf_counter() - assessment_started_at) * 1000, 2),
+                "inference_seconds": elapsed_s,
+                "model_used": model,
+                "elapsed_ms_total": round(elapsed_s * 1000, 2),
             },
         )
         return parsed_assessment

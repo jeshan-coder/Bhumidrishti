@@ -176,18 +176,33 @@ async def get_assessments(
         expression = f"a.{column} {operator} {placeholder}" if partial else f"LOWER(a.{column}) = {placeholder}"
         add_filter(arg_name, expression, value)
 
-    def add_numeric_range(arg_min: str, arg_max: str, column: str) -> None:
-        min_value = _as_float(tool_args.get(arg_min))
-        max_value = _as_float(tool_args.get(arg_max))
-        if min_value is None and max_value is None:
+    def add_numeric_range(arg_prefix: str, column: str) -> None:
+        exact_value = _as_float(tool_args.get(arg_prefix))
+        min_value = _as_float(tool_args.get(f"{arg_prefix}_min"))
+        max_value = _as_float(tool_args.get(f"{arg_prefix}_max"))
+        gt_value = _as_float(tool_args.get(f"{arg_prefix}_gt"))
+        lt_value = _as_float(tool_args.get(f"{arg_prefix}_lt"))
+        if all(v is None for v in (exact_value, min_value, max_value, gt_value, lt_value)):
             return
         if column not in assessment_columns:
-            unsupported_filters.extend([name for name, value in ((arg_min, min_value), (arg_max, max_value)) if value is not None])
+            for name, val in (
+                (arg_prefix, exact_value), (f"{arg_prefix}_min", min_value),
+                (f"{arg_prefix}_max", max_value), (f"{arg_prefix}_gt", gt_value),
+                (f"{arg_prefix}_lt", lt_value),
+            ):
+                if val is not None:
+                    unsupported_filters.append(name)
             return
+        if exact_value is not None:
+            add_filter(arg_prefix, f"a.{column} = {add_param(exact_value)}", exact_value)
         if min_value is not None:
-            add_filter(arg_min, f"a.{column} >= {add_param(min_value)}", min_value)
+            add_filter(f"{arg_prefix}_min", f"a.{column} >= {add_param(min_value)}", min_value)
         if max_value is not None:
-            add_filter(arg_max, f"a.{column} <= {add_param(max_value)}", max_value)
+            add_filter(f"{arg_prefix}_max", f"a.{column} <= {add_param(max_value)}", max_value)
+        if gt_value is not None:
+            add_filter(f"{arg_prefix}_gt", f"a.{column} > {add_param(gt_value)}", gt_value)
+        if lt_value is not None:
+            add_filter(f"{arg_prefix}_lt", f"a.{column} < {add_param(lt_value)}", lt_value)
 
     assessment_id = _as_text(tool_args.get("assessment_id") or tool_args.get("id"))
     if assessment_id and "id" in assessment_columns:
@@ -314,16 +329,16 @@ async def get_assessments(
         else:
             unsupported_filters.append("warning")
 
-    add_numeric_range("severity_min", "severity_max", "severity")
-    add_numeric_range("action_priority_min", "action_priority_max", "action_priority")
-    add_numeric_range("confidence_min", "confidence_max", "confidence")
-    add_numeric_range("elevation_min", "elevation_max", "elevation_m")
-    add_numeric_range("slope_min", "slope_max", "slope_degrees")
-    add_numeric_range("shelter_distance_min", "shelter_distance_max", "shelter_distance_m")
-    add_numeric_range("road_distance_min", "road_distance_max", "road_distance_m")
-    add_numeric_range("building_area_min", "building_area_max", "building_area_m2")
-    add_numeric_range("building_width_min", "building_width_max", "building_width_m")
-    add_numeric_range("building_height_min", "building_height_max", "building_height_m")
+    add_numeric_range("severity", "severity")
+    add_numeric_range("action_priority", "action_priority")
+    add_numeric_range("confidence", "confidence")
+    add_numeric_range("elevation", "elevation_m")
+    add_numeric_range("slope", "slope_degrees")
+    add_numeric_range("shelter_distance", "shelter_distance_m")
+    add_numeric_range("road_distance", "road_distance_m")
+    add_numeric_range("building_area", "building_area_m2")
+    add_numeric_range("building_width", "building_width_m")
+    add_numeric_range("building_height", "building_height_m")
 
     time_ranges = {
         "created": "created_at",

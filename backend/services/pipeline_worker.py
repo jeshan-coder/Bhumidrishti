@@ -719,72 +719,84 @@ async def save_ai_assessment(
     # Merge extra_fields (orthophoto-specific) into normalized data for lookup below.
     extra = extra_fields or {}
 
+    # Parameter index map (50 total):
+    # $1=id  $2=lat  $3=lon  $4=input_type  $5=photo_path
+    # $6=severity  $7=damage_type  $8=damage_description  $9=structural_risk
+    # $10=building_type  $11=building_floors  $12=building_material
+    # $13=estimated_occupants  $14=occupant_status  $15=recommended_action
+    # $16=action_priority  $17=flood_zone  $18=flood_return_period
+    # $19=elevation_m  $20=slope_degrees  $21=slope_risk
+    # $22=nearest_shelter  $23=shelter_distance_m  $24=shelter_type
+    # $25=road_access  $26=nearest_road  $27=road_distance_m
+    # $28=reasoning  $29=warnings  $30=confidence  $31=turkish_summary
+    # $32=model_used  $33=inference_seconds  $34=field_note
+    # $35=province  $36=district  $37=address_note
+    # $38=osm_building_id  $39=batch_id  $40=chip_path
+    # $41=site_id  $42=site_name  $43=pre_chip_path
+    # $44=building_area_m2  $45=building_width_m  $46=building_height_m
+    # $47=prompt_tokens  $48=completion_tokens  $49=total_tokens  $50=context_window
     sql_insert = """
         INSERT INTO assessments (
             id, lat, lon, geom, input_type, photo_path,
             severity, damage_type, damage_description, structural_risk,
             building_type, building_floors, building_material,
             estimated_occupants, occupant_status, recommended_action,
-            action_priority, flood_zone, elevation_m, slope_degrees,
-            slope_risk, nearest_shelter, shelter_distance_m, shelter_type,
-            road_access, nearest_road, road_distance_m, reasoning,
-            confidence, turkish_summary, field_note,
+            action_priority, flood_zone, flood_return_period,
+            elevation_m, slope_degrees, slope_risk,
+            nearest_shelter, shelter_distance_m, shelter_type,
+            road_access, nearest_road, road_distance_m,
+            reasoning, warnings, confidence, turkish_summary,
+            model_used, inference_seconds, field_note,
             province, district, address_note, status,
             osm_building_id, batch_id, chip_path,
             site_id, site_name, pre_chip_path,
-            building_area_m2, building_width_m, building_height_m
+            building_area_m2, building_width_m, building_height_m,
+            prompt_tokens, completion_tokens, total_tokens, context_window
         ) VALUES (
             $1, $2, $3,
             COALESCE(
-                -- 1. Exact OSM-ID lookup (batch/single-building path — osm_building_id = $34).
-                --    turkey_buildings.geom is MULTIPOLYGON EPSG:4326 — same SRID as assessments.geom.
+                -- 1. Exact OSM-ID lookup (batch/single-building path).
                 (
-                    SELECT tb.geom
-                    FROM turkey_buildings AS tb
-                    WHERE $34::bigint IS NOT NULL
-                      AND tb.osm_id = $34::bigint
+                    SELECT tb.geom FROM turkey_buildings AS tb
+                    WHERE $38::bigint IS NOT NULL AND tb.osm_id = $38::bigint
                     LIMIT 1
                 ),
-                -- 2. Spatial containment: building whose polygon contains the centroid point.
+                -- 2. Spatial containment.
                 (
-                    SELECT tb.geom
-                    FROM turkey_buildings AS tb
-                    WHERE ST_Contains(
-                        tb.geom,
-                        ST_SetSRID(ST_MakePoint($3, $2), 4326)
-                    )
+                    SELECT tb.geom FROM turkey_buildings AS tb
+                    WHERE ST_Contains(tb.geom, ST_SetSRID(ST_MakePoint($3, $2), 4326))
                     LIMIT 1
                 ),
-                -- 3. Nearest building within 30 m (handles slight centroid offsets).
+                -- 3. Nearest building within 30 m.
                 (
-                    SELECT tb.geom
-                    FROM turkey_buildings AS tb
+                    SELECT tb.geom FROM turkey_buildings AS tb
                     WHERE ST_DWithin(
                         tb.geom::geography,
-                        ST_SetSRID(ST_MakePoint($3, $2), 4326)::geography,
-                        30
+                        ST_SetSRID(ST_MakePoint($3, $2), 4326)::geography, 30
                     )
                     ORDER BY ST_Distance(
                         tb.geom::geography,
                         ST_SetSRID(ST_MakePoint($3, $2), 4326)::geography
-                    ) ASC
-                    LIMIT 1
+                    ) ASC LIMIT 1
                 ),
-                -- 4. Absolute fallback: store centroid as Point (EPSG:4326).
+                -- 4. Fallback: centroid point.
                 ST_SetSRID(ST_MakePoint($3, $2), 4326)
             ),
             $4, $5,
             $6, $7, $8, $9,
             $10, $11, $12,
             $13, $14, $15,
-            $16, $17, $18, $19,
-            $20, $21, $22, $23,
-            $24, $25, $26, $27,
-            $28, $29, $30,
-            $31, $32, $33, 'pending',
-            $34, $35, $36,
-            $37, $38, $39,
-            $40, $41, $42
+            $16, $17, $18,
+            $19, $20, $21,
+            $22, $23, $24,
+            $25, $26, $27,
+            $28, $29, $30, $31,
+            $32, $33, $34,
+            $35, $36, $37, 'pending',
+            $38, $39, $40,
+            $41, $42, $43,
+            $44, $45, $46,
+            $47, $48, $49, $50
         )
     """
 
@@ -810,59 +822,84 @@ async def save_ai_assessment(
                 lon,
                 input_type,
                 photo_path,
+                # $6–$9
                 normalized_assessment_data.get("severity"),
                 normalized_assessment_data.get("damage_type"),
                 normalized_assessment_data.get("damage_description"),
                 normalized_assessment_data.get("structural_risk"),
+                # $10–$12
                 normalized_assessment_data.get("building_type"),
                 normalized_assessment_data.get("building_floors"),
                 normalized_assessment_data.get("building_material"),
+                # $13–$15
                 normalized_assessment_data.get("estimated_occupants"),
                 normalized_assessment_data.get("occupant_status"),
                 normalized_assessment_data.get("recommended_action"),
+                # $16–$18
                 normalized_assessment_data.get("action_priority"),
                 normalized_assessment_data.get("flood_zone", False),
+                normalized_assessment_data.get("flood_return_period"),
+                # $19–$21
                 normalized_assessment_data.get("elevation_m"),
                 normalized_assessment_data.get("slope_degrees"),
                 normalized_assessment_data.get("slope_risk"),
+                # $22–$24
                 normalized_assessment_data.get("nearest_shelter"),
                 normalized_assessment_data.get("shelter_distance_m"),
                 normalized_assessment_data.get("shelter_type"),
+                # $25–$27
                 normalized_assessment_data.get("road_access"),
                 normalized_assessment_data.get("nearest_road"),
                 normalized_assessment_data.get("road_distance_m"),
+                # $28–$31
                 normalized_assessment_data.get("reasoning"),
+                json.dumps(normalized_assessment_data.get("warnings") or []),
                 normalized_assessment_data.get("confidence"),
                 normalized_assessment_data.get("turkish_summary"),
+                # $32–$34 (hard-coded by pipeline, not model)
+                normalized_assessment_data.get("model_used"),
+                normalized_assessment_data.get("inference_seconds"),
                 field_note,
+                # $35–$37
                 province_value,
                 district_value,
                 address_note_value,
-                # Extra orthophoto fields ($34–$42)
+                # $38–$40 (extra orthophoto fields)
                 extra.get("osm_building_id") or normalized_assessment_data.get("osm_building_id"),
                 extra.get("batch_id") or normalized_assessment_data.get("batch_id"),
                 extra.get("chip_path"),
+                # $41–$43
                 extra.get("site_id"),
                 extra.get("site_name"),
                 extra.get("pre_chip_path"),
+                # $44–$46
                 extra.get("building_area_m2"),
                 extra.get("building_width_m"),
                 extra.get("building_height_m"),
+                # $47–$50 (token usage — injected by gemma_pipeline, not model)
+                normalized_assessment_data.get("prompt_tokens"),
+                normalized_assessment_data.get("completion_tokens"),
+                normalized_assessment_data.get("total_tokens"),
+                normalized_assessment_data.get("context_window"),
             )
     except Exception as exc:
         # Backward-compat: older DBs may not have assessments.site_id yet.
         if "site_id" in str(exc).lower():
             logger.warning("assessment_insert_without_site_id_fallback error=%s", exc)
+            # Legacy fallback omits site_id column (older DB schema).
+            # Parameter map matches main INSERT minus site_id ($41→site_name, $42→pre_chip_path, etc.)
             legacy_sql_insert = """
                 INSERT INTO assessments (
                     id, lat, lon, geom, input_type, photo_path,
                     severity, damage_type, damage_description, structural_risk,
                     building_type, building_floors, building_material,
                     estimated_occupants, occupant_status, recommended_action,
-                    action_priority, flood_zone, elevation_m, slope_degrees,
-                    slope_risk, nearest_shelter, shelter_distance_m, shelter_type,
-                    road_access, nearest_road, road_distance_m, reasoning,
-                    confidence, turkish_summary, field_note,
+                    action_priority, flood_zone, flood_return_period,
+                    elevation_m, slope_degrees, slope_risk,
+                    nearest_shelter, shelter_distance_m, shelter_type,
+                    road_access, nearest_road, road_distance_m,
+                    reasoning, warnings, confidence, turkish_summary,
+                    model_used, inference_seconds, field_note,
                     province, district, address_note, status,
                     osm_building_id, batch_id, chip_path,
                     site_name, pre_chip_path,
@@ -870,60 +907,35 @@ async def save_ai_assessment(
                 ) VALUES (
                     $1, $2, $3,
                     COALESCE(
-                        (
-                            SELECT tb.geom
-                            FROM turkey_buildings AS tb
-                            WHERE $34::bigint IS NOT NULL
-                              AND tb.osm_id = $34::bigint
-                            LIMIT 1
-                        ),
-                        (
-                            SELECT tb.geom
-                            FROM turkey_buildings AS tb
-                            WHERE ST_Contains(
-                                tb.geom,
-                                ST_SetSRID(ST_MakePoint($3, $2), 4326)
-                            )
-                            LIMIT 1
-                        ),
-                        (
-                            SELECT tb.geom
-                            FROM turkey_buildings AS tb
-                            WHERE ST_DWithin(
-                                tb.geom::geography,
-                                ST_SetSRID(ST_MakePoint($3, $2), 4326)::geography,
-                                30
-                            )
-                            ORDER BY ST_Distance(
-                                tb.geom::geography,
-                                ST_SetSRID(ST_MakePoint($3, $2), 4326)::geography
-                            ) ASC
-                            LIMIT 1
-                        ),
+                        (SELECT tb.geom FROM turkey_buildings AS tb
+                         WHERE $38::bigint IS NOT NULL AND tb.osm_id = $38::bigint LIMIT 1),
+                        (SELECT tb.geom FROM turkey_buildings AS tb
+                         WHERE ST_Contains(tb.geom, ST_SetSRID(ST_MakePoint($3, $2), 4326)) LIMIT 1),
+                        (SELECT tb.geom FROM turkey_buildings AS tb
+                         WHERE ST_DWithin(tb.geom::geography, ST_SetSRID(ST_MakePoint($3, $2), 4326)::geography, 30)
+                         ORDER BY ST_Distance(tb.geom::geography, ST_SetSRID(ST_MakePoint($3, $2), 4326)::geography) ASC LIMIT 1),
                         ST_SetSRID(ST_MakePoint($3, $2), 4326)
                     ),
                     $4, $5,
                     $6, $7, $8, $9,
                     $10, $11, $12,
                     $13, $14, $15,
-                    $16, $17, $18, $19,
-                    $20, $21, $22, $23,
-                    $24, $25, $26, $27,
-                    $28, $29, $30,
-                    $31, $32, $33, 'pending',
-                    $34, $35, $36,
-                    $37, $38,
-                    $39, $40, $41
+                    $16, $17, $18,
+                    $19, $20, $21,
+                    $22, $23, $24,
+                    $25, $26, $27,
+                    $28, $29, $30, $31,
+                    $32, $33, $34,
+                    $35, $36, $37, 'pending',
+                    $38, $39, $40,
+                    $41, $42,
+                    $43, $44, $45
                 )
             """
             async with pool.acquire() as conn:
                 await conn.execute(
                     legacy_sql_insert,
-                    assessment_id,
-                    lat,
-                    lon,
-                    input_type,
-                    photo_path,
+                    assessment_id, lat, lon, input_type, photo_path,
                     normalized_assessment_data.get("severity"),
                     normalized_assessment_data.get("damage_type"),
                     normalized_assessment_data.get("damage_description"),
@@ -936,6 +948,7 @@ async def save_ai_assessment(
                     normalized_assessment_data.get("recommended_action"),
                     normalized_assessment_data.get("action_priority"),
                     normalized_assessment_data.get("flood_zone", False),
+                    normalized_assessment_data.get("flood_return_period"),
                     normalized_assessment_data.get("elevation_m"),
                     normalized_assessment_data.get("slope_degrees"),
                     normalized_assessment_data.get("slope_risk"),
@@ -946,12 +959,13 @@ async def save_ai_assessment(
                     normalized_assessment_data.get("nearest_road"),
                     normalized_assessment_data.get("road_distance_m"),
                     normalized_assessment_data.get("reasoning"),
+                    json.dumps(normalized_assessment_data.get("warnings") or []),
                     normalized_assessment_data.get("confidence"),
                     normalized_assessment_data.get("turkish_summary"),
+                    normalized_assessment_data.get("model_used"),
+                    normalized_assessment_data.get("inference_seconds"),
                     field_note,
-                    province_value,
-                    district_value,
-                    address_note_value,
+                    province_value, district_value, address_note_value,
                     extra.get("osm_building_id") or normalized_assessment_data.get("osm_building_id"),
                     extra.get("batch_id") or normalized_assessment_data.get("batch_id"),
                     extra.get("chip_path"),
@@ -1151,6 +1165,17 @@ async def process_upload(upload_row: dict[str, Any], pool) -> None:
             thought="Saving AI assessment to database.",
         )
 
+        # Resolve which site spatially contains this building's coordinates.
+        site_row = None
+        async with pool.acquire() as conn:
+            site_row = await conn.fetchrow(
+                """SELECT id, name FROM sites
+                   WHERE boundary IS NOT NULL
+                   AND ST_Contains(boundary, ST_SetSRID(ST_MakePoint($1, $2), 4326))
+                   LIMIT 1""",
+                lon, lat,
+            )
+
         # This helper persists AI output into the assessments table.
         assessment_id = await save_ai_assessment(
             pool=pool,
@@ -1160,6 +1185,10 @@ async def process_upload(upload_row: dict[str, Any], pool) -> None:
             photo_path=saved_path,
             field_note=field_note,
             assessment_data=assessment_data,
+            extra_fields={
+                "site_id": site_row["id"] if site_row else None,
+                "site_name": site_row["name"] if site_row else None,
+            },
         )
         _log_pipeline_event(
             "process_upload_assessment_saved",
@@ -1353,6 +1382,17 @@ async def process_upload_group(upload_rows: list[dict[str, Any]], pool) -> None:
             thought="Saving grouped assessment to database.",
         )
 
+        # Resolve which site spatially contains this building's coordinates.
+        site_row = None
+        async with pool.acquire() as conn:
+            site_row = await conn.fetchrow(
+                """SELECT id, name FROM sites
+                   WHERE boundary IS NOT NULL
+                   AND ST_Contains(boundary, ST_SetSRID(ST_MakePoint($1, $2), 4326))
+                   LIMIT 1""",
+                lon, lat,
+            )
+
         assessment_id = await save_ai_assessment(
             pool=pool,
             lat=lat,
@@ -1361,6 +1401,10 @@ async def process_upload_group(upload_rows: list[dict[str, Any]], pool) -> None:
             photo_path=representative_photo_path,
             field_note=field_note,
             assessment_data=assessment_data,
+            extra_fields={
+                "site_id": site_row["id"] if site_row else None,
+                "site_name": site_row["name"] if site_row else None,
+            },
         )
 
         set_analysis_progress_for_uploads(

@@ -18,7 +18,7 @@ export function MapDrawControls({
 }: MapDrawControlsProps) {
   return (
     <>
-      <div className="absolute left-4 top-24 z-20 flex flex-col gap-2">
+      <div className="absolute right-4 top-24 z-20 flex flex-col gap-2">
         {drawMode ? (
           <button
             type="button"

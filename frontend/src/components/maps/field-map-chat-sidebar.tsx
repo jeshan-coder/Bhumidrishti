@@ -2,7 +2,7 @@
 
 import { useRef, useState } from "react"
 import type { ComponentPropsWithoutRef } from "react"
-import { Check, Copy, MessageCircle, Pencil, RotateCcw, X } from "lucide-react"
+import { Check, Copy, Maximize2, MessageCircle, Minimize2, Pencil, RotateCcw, X } from "lucide-react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { streamChatRequest } from "@/lib/api/chat"
@@ -82,13 +82,18 @@ function formatToolCallLabel(toolName: string, args: Record<string, unknown>): s
     case "get_nearest_shelter":    return `get_nearest_shelter${coords}`
     case "get_assessments": {
       const hints: string[] = []
-      if (args.province)      hints.push(`${args.province}`)
-      if (args.site_name)     hints.push(`site: ${args.site_name}`)
-      if (args.severity_min)  hints.push(`sev ≥${args.severity_min}`)
-      if (args.severity_max)  hints.push(`sev ≤${args.severity_max}`)
-      if (args.status)        hints.push(`${args.status}`)
+      if (args.province)        hints.push(`${args.province}`)
+      if (args.site_name)       hints.push(`site: ${args.site_name}`)
+      if (args.severity != null) hints.push(`sev=${args.severity}`)
+      else if (args.severity_min != null) hints.push(`sev≥${args.severity_min}`)
+      else if (args.severity_max != null) hints.push(`sev≤${args.severity_max}`)
+      if (args.severity_gt != null) hints.push(`sev>${args.severity_gt}`)
+      if (args.severity_lt != null) hints.push(`sev<${args.severity_lt}`)
+      if (args.status)          hints.push(`${args.status}`)
       if (args.occupant_status) hints.push(`${args.occupant_status}`)
-      if (args.assessment_id) hints.push(`${args.assessment_id}`)
+      if (args.assessment_id)   hints.push(`${args.assessment_id}`)
+      if (args.damage_type)     hints.push(`${args.damage_type}`)
+      if (args.structural_risk) hints.push(`risk:${args.structural_risk}`)
       return `get_assessments${hints.length ? ` (${hints.join(", ")})` : ""}`
     }
     case "get_sites":
@@ -151,6 +156,27 @@ export function FieldMapChatSidebar({
   // This variable tracks which assistant message was most recently copied (for checkmark flash).
   const [copiedMessageIndex, setCopiedMessageIndex] = useState<number | null>(null)
 
+  // This variable controls whether the sidebar is in wide expanded mode.
+  const [isExpanded, setIsExpanded] = useState(false)
+
+  // Approximate token count for the current conversation.
+  // 2500 tokens covers the system prompt + tool schemas sent on every request.
+  // Message text is estimated at 4 chars per token (English average).
+  const SYSTEM_PROMPT_TOKEN_ESTIMATE = 2500
+  const MAX_CONTEXT_TOKENS = 256000
+  const estimatedTokens = SYSTEM_PROMPT_TOKEN_ESTIMATE + Math.ceil(
+    messages.reduce((sum, m) => sum + m.content.length, 0) / 4
+  )
+  const tokenPct = (estimatedTokens / MAX_CONTEXT_TOKENS) * 100
+  const tokenBarColor =
+    tokenPct > 80 ? "bg-red-500" :
+    tokenPct > 60 ? "bg-orange-400" :
+    tokenPct > 30 ? "bg-yellow-400" :
+    "bg-[#0F6E56]"
+  const tokenLabel = estimatedTokens >= 1000
+    ? `~${(estimatedTokens / 1000).toFixed(1)}k`
+    : `~${estimatedTokens}`
+
   // This function identifies browser abort errors from cancelled streaming requests.
   const isAbortError = (error: unknown): boolean => {
     if (error instanceof DOMException) {
@@ -166,6 +192,17 @@ export function FieldMapChatSidebar({
     setThinkingStatus("")
     setModelThinkingText("")
     setIsSending(false)
+  }
+
+  // This function clears all conversation history, starting a fresh context window.
+  const handleNewConversation = () => {
+    activeStreamAbortControllerRef.current?.abort()
+    setMessages([])
+    setDraftMessage("")
+    setThinkingStatus("")
+    setModelThinkingText("")
+    setIsSending(false)
+    setEditingUserMessageIndex(null)
   }
 
   // This function starts one streaming response from a prepared chat history.
@@ -275,7 +312,6 @@ export function FieldMapChatSidebar({
         activeStreamAbortControllerRef.current = null
       }
       setThinkingStatus("")
-      setModelThinkingText("")
       setIsSending(false)
     }
   }
@@ -365,16 +401,35 @@ export function FieldMapChatSidebar({
       </button>
 
       {isSidebarOpen ? (
-        <aside className="absolute left-0 top-0 z-30 flex h-full w-full max-w-sm flex-col border-r border-[#D3D1C7] bg-[#FAFAF8] shadow-xl">
+        <aside className={`absolute left-0 top-0 z-30 flex h-full w-full flex-col border-r border-[#D3D1C7] bg-[#FAFAF8] shadow-xl transition-[max-width] duration-300 ease-in-out ${isExpanded ? "max-w-2xl" : "max-w-sm"}`}>
           <div className="flex items-center justify-between border-b border-[#D3D1C7] px-4 py-3">
             <h2 className="text-sm font-semibold text-[#085041]">Gemma4 Assistant</h2>
-            <button
-              type="button"
-              onClick={() => onOpenChange(false)}
-              className="rounded-md px-2 py-1 text-xs font-medium text-[#085041] hover:bg-[#E1F5EE]"
-            >
-              Close
-            </button>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={handleNewConversation}
+                title="New conversation — clears history"
+                className="rounded-md px-2 py-1 text-xs font-medium text-[#085041] hover:bg-[#E1F5EE]"
+              >
+                New Chat
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsExpanded((prev) => !prev)}
+                title={isExpanded ? "Collapse sidebar" : "Expand sidebar"}
+                className="rounded-md p-1.5 text-[#085041] hover:bg-[#E1F5EE]"
+                aria-label={isExpanded ? "Collapse sidebar" : "Expand sidebar"}
+              >
+                {isExpanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+              </button>
+              <button
+                type="button"
+                onClick={() => onOpenChange(false)}
+                className="rounded-md px-2 py-1 text-xs font-medium text-[#085041] hover:bg-[#E1F5EE]"
+              >
+                Close
+              </button>
+            </div>
           </div>
 
           <div className="flex-1 space-y-2 overflow-y-auto p-4">
@@ -490,6 +545,17 @@ export function FieldMapChatSidebar({
                 </button>
               </div>
             ) : null}
+            <div className="mb-1.5 flex items-center gap-2">
+              <div className="h-1 flex-1 overflow-hidden rounded-full bg-[#E6E3D8]">
+                <div
+                  className={`h-full rounded-full transition-all duration-300 ${tokenBarColor}`}
+                  style={{ width: `${Math.min(tokenPct, 100)}%` }}
+                />
+              </div>
+              <span className="shrink-0 text-[10px] font-mono text-[#5a6b65]">
+                {tokenLabel} / 256K
+              </span>
+            </div>
             <textarea
               value={draftMessage}
               onChange={(event) => setDraftMessage(event.target.value)}

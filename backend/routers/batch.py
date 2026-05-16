@@ -142,6 +142,279 @@ async def list_batch_sites() -> dict[str, Any]:
         return _success([])
 
 
+@router.get("/unassigned-uploads")
+async def get_unassigned_uploads() -> dict[str, Any]:
+    """Return ground_photo / video uploads that are not yet analyzed AND not inside any site boundary.
+
+    An upload is considered "unassigned" when:
+    - file_type IN ('ground_photo', 'video')
+    - is_analyzed = false
+    - has lat/lon
+    - no existing site's boundary polygon contains the upload coordinate
+
+    Also returns the nearest turkey_buildings osm_id within 30 m (if any) so the
+    frontend can highlight the exact building footprint on the map.
+    """
+    from db.postgres import get_pool
+    pool = get_pool()
+    if not pool:
+        return _success({"count": 0, "uploads": []})
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    u.id,
+                    u.file_type,
+                    u.lat,
+                    u.lon,
+                    u.original_filename,
+                    u.uploaded_at,
+                    u.worker_name,
+                    tb.osm_id AS nearby_osm_id
+                FROM uploads u
+                LEFT JOIN LATERAL (
+                    SELECT osm_id
+                    FROM turkey_buildings
+                    WHERE ST_DWithin(
+                        ST_SetSRID(ST_MakePoint(u.lon, u.lat), 4326)::geography,
+                        ST_Centroid(geom)::geography,
+                        30
+                    )
+                    ORDER BY
+                        ST_Distance(
+                            ST_SetSRID(ST_MakePoint(u.lon, u.lat), 4326)::geography,
+                            ST_Centroid(geom)::geography
+                        )
+                    LIMIT 1
+                ) tb ON TRUE
+                WHERE u.file_type IN ('ground_photo', 'video')
+                  AND u.is_analyzed = false
+                  AND u.lat IS NOT NULL
+                  AND u.lon IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM sites s
+                      WHERE s.boundary IS NOT NULL
+                        AND ST_Within(
+                            ST_SetSRID(ST_MakePoint(u.lon, u.lat), 4326),
+                            s.boundary
+                        )
+                  )
+                ORDER BY u.uploaded_at DESC
+                """
+            )
+        uploads = [
+            {
+                "id": str(row["id"]),
+                "file_type": str(row["file_type"]),
+                "lat": float(row["lat"]),
+                "lon": float(row["lon"]),
+                "filename": str(row["original_filename"] or ""),
+                "uploaded_at": row["uploaded_at"].isoformat() if row["uploaded_at"] else None,
+                "worker_name": str(row["worker_name"]) if row["worker_name"] else None,
+                "nearby_osm_id": int(row["nearby_osm_id"]) if row["nearby_osm_id"] else None,
+            }
+            for row in rows
+        ]
+        return _success({"count": len(uploads), "uploads": uploads})
+    except Exception as exc:
+        logger.warning("unassigned_uploads_query_failed error=%s", exc)
+        return _success({"count": 0, "uploads": []})
+
+
+@router.get("/sites-full")
+async def list_sites_full() -> dict[str, Any]:
+    """Return full site records with id, boundary GeoJSON, building counts, and status."""
+    from db.postgres import get_pool
+    pool = get_pool()
+    if not pool:
+        return _success([])
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    s.id,
+                    s.name,
+                    s.status,
+                    s.total_buildings,
+                    s.created_at,
+                    s.updated_at,
+                    ST_AsGeoJSON(s.boundary)::text  AS boundary_geojson,
+                    COUNT(DISTINCT a.id)::int        AS assessed_count,
+                    COALESCE(SUM(CASE WHEN a.severity >= 4 THEN 1 ELSE 0 END), 0)::int AS critical_count,
+                    COALESCE(
+                        COUNT(DISTINCT tb.osm_id)
+                        FILTER (WHERE tb.osm_id IS NOT NULL),
+                        0
+                    )::int AS spatial_building_count
+                FROM sites s
+                LEFT JOIN assessments a
+                  ON a.site_id = s.id
+                 AND a.status NOT IN ('false_positive')
+                LEFT JOIN turkey_buildings tb
+                  ON s.boundary IS NOT NULL
+                 AND ST_Intersects(tb.geom, s.boundary)
+                GROUP BY s.id, s.name, s.status, s.total_buildings, s.created_at,
+                         s.updated_at, s.boundary
+                ORDER BY s.updated_at DESC
+                """
+            )
+        result = []
+        for row in rows:
+            boundary = None
+            raw = row.get("boundary_geojson")
+            if raw:
+                try:
+                    boundary = json.loads(raw)
+                except Exception:
+                    pass
+            result.append({
+                "id": int(row["id"]),
+                "name": str(row["name"]),
+                "status": str(row["status"]),
+                "total_buildings": int(row["spatial_building_count"] or row["total_buildings"] or 0),
+                "assessed_count": int(row["assessed_count"] or 0),
+                "critical_count": int(row["critical_count"] or 0),
+                "boundary": boundary,
+                "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+            })
+        return _success(result)
+    except Exception as exc:
+        logger.warning("sites_full_query_failed error=%s", exc)
+        return _success([])
+
+
+@router.get("/sites/{site_id}/buildings")
+async def list_site_buildings(site_id: int, limit: int = 2000) -> dict[str, Any]:
+    """Return all buildings within a site's boundary polygon with their latest assessment.
+
+    Each building record includes: osm_id, centroid_lat, centroid_lon, area_m2,
+    and the latest assessment fields (severity, damage_type, status, assessment_id).
+    Buildings with no assessment are returned with null assessment fields.
+    """
+    from db.postgres import get_pool
+    pool = get_pool()
+    if not pool:
+        return _success({"site_id": site_id, "buildings": []})
+
+    safe_limit = max(1, min(limit, 10000))
+    try:
+        async with pool.acquire() as conn:
+            # Verify site exists and has a boundary.
+            site_row = await conn.fetchrow(
+                "SELECT id, name, status, boundary FROM sites WHERE id = $1",
+                site_id,
+            )
+            if not site_row:
+                raise HTTPException(status_code=404, detail="Site not found")
+            if not site_row["boundary"]:
+                return _success({
+                    "site_id": site_id,
+                    "site_name": str(site_row["name"]),
+                    "buildings": [],
+                    "note": "Site has no boundary polygon",
+                })
+
+            rows = await conn.fetch(
+                """
+                WITH site_buildings AS (
+                    SELECT
+                        tb.osm_id,
+                        ST_X(ST_Centroid(tb.geom))   AS centroid_lon,
+                        ST_Y(ST_Centroid(tb.geom))   AS centroid_lat,
+                        ST_Area(tb.geom::geography)  AS area_m2,
+                        ST_AsGeoJSON(tb.geom)::text  AS polygon_geojson
+                    FROM sites s
+                    JOIN turkey_buildings tb
+                      ON ST_Intersects(tb.geom, s.boundary)
+                    WHERE s.id = $1
+                    LIMIT $2
+                ),
+                latest_assessment AS (
+                    SELECT DISTINCT ON (a.osm_building_id)
+                        a.osm_building_id,
+                        a.id            AS assessment_id,
+                        a.severity,
+                        a.damage_type,
+                        a.structural_risk,
+                        a.status        AS assessment_status,
+                        a.input_type,
+                        a.confidence,
+                        a.recommended_action,
+                        a.created_at    AS assessed_at
+                    FROM assessments a
+                    WHERE a.site_id = $1
+                       OR a.osm_building_id IN (SELECT osm_id FROM site_buildings)
+                    ORDER BY a.osm_building_id, a.created_at DESC
+                )
+                SELECT
+                    sb.osm_id,
+                    sb.centroid_lat,
+                    sb.centroid_lon,
+                    sb.area_m2,
+                    sb.polygon_geojson,
+                    la.assessment_id,
+                    la.severity,
+                    la.damage_type,
+                    la.structural_risk,
+                    la.assessment_status,
+                    la.input_type,
+                    la.confidence,
+                    la.recommended_action,
+                    la.assessed_at
+                FROM site_buildings sb
+                LEFT JOIN latest_assessment la
+                  ON la.osm_building_id = sb.osm_id
+                ORDER BY COALESCE(la.severity, 0) DESC, sb.osm_id
+                """,
+                site_id,
+                safe_limit,
+            )
+
+        buildings = []
+        for row in rows:
+            polygon = None
+            raw = row.get("polygon_geojson")
+            if raw:
+                try:
+                    polygon = json.loads(raw)
+                except Exception:
+                    pass
+            buildings.append({
+                "osm_id": int(row["osm_id"]),
+                "centroid_lat": float(row["centroid_lat"]),
+                "centroid_lon": float(row["centroid_lon"]),
+                "area_m2": round(float(row["area_m2"] or 0), 1),
+                "polygon": polygon,
+                "assessment_id": str(row["assessment_id"]) if row["assessment_id"] else None,
+                "severity": int(row["severity"]) if row["severity"] is not None else None,
+                "damage_type": str(row["damage_type"]) if row["damage_type"] else None,
+                "structural_risk": str(row["structural_risk"]) if row["structural_risk"] else None,
+                "assessment_status": str(row["assessment_status"]) if row["assessment_status"] else None,
+                "input_type": str(row["input_type"]) if row["input_type"] else None,
+                "confidence": round(float(row["confidence"]), 3) if row["confidence"] is not None else None,
+                "recommended_action": str(row["recommended_action"]) if row["recommended_action"] else None,
+                "assessed_at": row["assessed_at"].isoformat() if row["assessed_at"] else None,
+            })
+
+        return _success({
+            "site_id": site_id,
+            "site_name": str(site_row["name"]),
+            "site_status": str(site_row["status"]),
+            "total": len(buildings),
+            "assessed": sum(1 for b in buildings if b["assessment_id"]),
+            "buildings": buildings,
+        })
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("site_buildings_query_failed site_id=%s error=%s", site_id, exc)
+        return _success({"site_id": site_id, "buildings": [], "error": str(exc)})
+
+
 @router.get("/pending")
 async def list_pending_batches(limit: int = 20, only_active: bool = True) -> dict[str, Any]:
     """Return recent batches still running or failed before every building finished.

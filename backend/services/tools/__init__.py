@@ -200,7 +200,12 @@ COORDINATION_TOOLS: list[dict] = [
                 "properties": {
                     "single": {
                         "type": "boolean",
-                        "description": "True when the user asks for one specific/latest/top assessment record",
+                        "description": (
+                            "Set true ONLY when user explicitly asks for ONE record: "
+                            "'the latest assessment', 'give me one building', 'show me the top result'. "
+                            "NEVER set single=true when user asks for 'buildings' (plural), "
+                            "'all buildings', 'show me buildings that...', or any multi-record query."
+                        ),
                     },
                     "site_id": {"type": "integer", "description": "Filter by sites.id"},
                     "site_name": {"type": "string", "description": "Partial match on assessment/site/batch site name"},
@@ -226,10 +231,26 @@ COORDINATION_TOOLS: list[dict] = [
                     "structural_risk": {"type": "string", "description": "high, moderate, low, or unknown"},
                     "building_type": {"type": "string", "description": "Partial match on building_type such as residential, school, hospital, mosque, commercial"},
                     "building_material": {"type": "string", "description": "Partial match on building_material"},
-                    "severity_min": {"type": "integer", "description": "Minimum severity 1-5"},
-                    "severity_max": {"type": "integer", "description": "Maximum severity 1-5"},
-                    "action_priority_min": {"type": "integer", "description": "Minimum action priority 1-5"},
-                    "action_priority_max": {"type": "integer", "description": "Maximum action priority 1-5"},
+                    "severity": {"type": "integer", "description": "Exact severity (1-5). Use this when user says 'severity 3' or 'severity equal to 3'"},
+                    "severity_min": {"type": "integer", "description": "severity >= N (1-5). Use for 'severity 3 or higher' / 'at least 3'"},
+                    "severity_max": {"type": "integer", "description": "severity <= N (1-5). Use for 'severity 3 or lower' / 'at most 3'"},
+                    "severity_gt": {"type": "integer", "description": "severity > N (1-5). Use for 'severity greater than 3'"},
+                    "severity_lt": {"type": "integer", "description": "severity < N (1-5). Use for 'severity less than 3'"},
+                    "action_priority": {"type": "integer", "description": "Exact action priority (1-5)"},
+                    "action_priority_min": {"type": "integer", "description": "action_priority >= N"},
+                    "action_priority_max": {"type": "integer", "description": "action_priority <= N"},
+                    "action_priority_gt": {"type": "integer", "description": "action_priority > N"},
+                    "action_priority_lt": {"type": "integer", "description": "action_priority < N"},
+                    "recommended_action": {
+                        "type": "string",
+                        "description": (
+                            "Partial match on recommended action. "
+                            "Values: immediate_search_rescue, urgent_evacuation, structural_assessment, "
+                            "monitor, no_action_needed. "
+                            "Use this when user asks for buildings needing 'immediate search rescue', "
+                            "'urgent evacuation', 'structural assessment', etc."
+                        ),
+                    },
                     "status": {
                         "type": "string",
                         "description": "pending, in_review, responded, closed, false_positive",
@@ -240,27 +261,51 @@ COORDINATION_TOOLS: list[dict] = [
                     },
                     "flood_zone": {"type": "boolean", "description": "Filter flood zone true/false"},
                     "flood_return_period": {"type": "string", "description": "Partial match, e.g. 100yr, 50yr, none"},
-                    "elevation_min": {"type": "number", "description": "Minimum elevation in metres"},
-                    "elevation_max": {"type": "number", "description": "Maximum elevation in metres"},
-                    "slope_min": {"type": "number", "description": "Minimum slope in degrees"},
-                    "slope_max": {"type": "number", "description": "Maximum slope in degrees"},
+                    "elevation": {"type": "number", "description": "Exact elevation in metres"},
+                    "elevation_min": {"type": "number", "description": "elevation >= N metres"},
+                    "elevation_max": {"type": "number", "description": "elevation <= N metres"},
+                    "elevation_gt": {"type": "number", "description": "elevation > N metres"},
+                    "elevation_lt": {"type": "number", "description": "elevation < N metres"},
+                    "slope": {"type": "number", "description": "Exact slope in degrees"},
+                    "slope_min": {"type": "number", "description": "slope >= N degrees"},
+                    "slope_max": {"type": "number", "description": "slope <= N degrees"},
+                    "slope_gt": {"type": "number", "description": "slope > N degrees"},
+                    "slope_lt": {"type": "number", "description": "slope < N degrees"},
                     "slope_risk": {"type": "string", "description": "high, moderate, or low"},
                     "road_access": {"type": "string", "description": "passable, blocked, or unknown"},
                     "nearest_road": {"type": "string", "description": "Partial match on nearest road name"},
-                    "road_distance_min": {"type": "number", "description": "Minimum road distance in metres"},
-                    "road_distance_max": {"type": "number", "description": "Maximum road distance in metres"},
+                    "road_distance": {"type": "number", "description": "Exact road distance in metres"},
+                    "road_distance_min": {"type": "number", "description": "road_distance >= N metres"},
+                    "road_distance_max": {"type": "number", "description": "road_distance <= N metres"},
+                    "road_distance_gt": {"type": "number", "description": "road_distance > N metres"},
+                    "road_distance_lt": {"type": "number", "description": "road_distance < N metres"},
                     "nearest_shelter": {"type": "string", "description": "Partial match on nearest shelter name"},
                     "shelter_type": {"type": "string", "description": "school, hospital, community_centre, mosque, etc."},
-                    "shelter_distance_min": {"type": "number", "description": "Minimum shelter distance in metres"},
-                    "shelter_distance_max": {"type": "number", "description": "Maximum shelter distance in metres"},
-                    "building_area_min": {"type": "number", "description": "Minimum building footprint area in square metres"},
-                    "building_area_max": {"type": "number", "description": "Maximum building footprint area in square metres"},
-                    "building_width_min": {"type": "number", "description": "Minimum building width in metres"},
-                    "building_width_max": {"type": "number", "description": "Maximum building width in metres"},
-                    "building_height_min": {"type": "number", "description": "Minimum building height in metres"},
-                    "building_height_max": {"type": "number", "description": "Maximum building height in metres"},
-                    "confidence_min": {"type": "number", "description": "Minimum model confidence 0-1"},
-                    "confidence_max": {"type": "number", "description": "Maximum model confidence 0-1"},
+                    "shelter_distance": {"type": "number", "description": "Exact shelter distance in metres"},
+                    "shelter_distance_min": {"type": "number", "description": "shelter_distance >= N metres"},
+                    "shelter_distance_max": {"type": "number", "description": "shelter_distance <= N metres"},
+                    "shelter_distance_gt": {"type": "number", "description": "shelter_distance > N metres"},
+                    "shelter_distance_lt": {"type": "number", "description": "shelter_distance < N metres"},
+                    "building_area": {"type": "number", "description": "Exact building footprint area in square metres"},
+                    "building_area_min": {"type": "number", "description": "building_area >= N m²"},
+                    "building_area_max": {"type": "number", "description": "building_area <= N m²"},
+                    "building_area_gt": {"type": "number", "description": "building_area > N m²"},
+                    "building_area_lt": {"type": "number", "description": "building_area < N m²"},
+                    "building_width": {"type": "number", "description": "Exact building width in metres"},
+                    "building_width_min": {"type": "number", "description": "building_width >= N metres"},
+                    "building_width_max": {"type": "number", "description": "building_width <= N metres"},
+                    "building_width_gt": {"type": "number", "description": "building_width > N metres"},
+                    "building_width_lt": {"type": "number", "description": "building_width < N metres"},
+                    "building_height": {"type": "number", "description": "Exact building height in metres"},
+                    "building_height_min": {"type": "number", "description": "building_height >= N metres"},
+                    "building_height_max": {"type": "number", "description": "building_height <= N metres"},
+                    "building_height_gt": {"type": "number", "description": "building_height > N metres"},
+                    "building_height_lt": {"type": "number", "description": "building_height < N metres"},
+                    "confidence": {"type": "number", "description": "Exact model confidence 0-1"},
+                    "confidence_min": {"type": "number", "description": "confidence >= N (0-1)"},
+                    "confidence_max": {"type": "number", "description": "confidence <= N (0-1)"},
+                    "confidence_gt": {"type": "number", "description": "confidence > N (0-1)"},
+                    "confidence_lt": {"type": "number", "description": "confidence < N (0-1)"},
                     "worker_name": {"type": "string", "description": "Partial match on submitting field worker name"},
                     "worker_device": {"type": "string", "description": "Partial match on field worker device"},
                     "team_name": {"type": "string", "description": "Partial match on response_team / rescue team name"},
@@ -312,23 +357,48 @@ COORDINATION_TOOLS: list[dict] = [
         "function": {
             "name": "get_sites",
             "description": (
-                "Query sites with optional filters and summary counts. "
-                "Supports lookup by id/name, geometry containment by lat/lon, "
-                "or by building OSM id lying inside site boundary."
+                "Return sites with assessment summary counts. "
+                "Call with {} (no arguments) to list ALL sites regardless of status — "
+                "this is the correct call for 'list sites', 'all sites', 'available sites', "
+                "'what sites exist', 'how many sites'. "
+                "Use filters only when the user is explicit: a specific name, id, or status keyword."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "site_id": {"type": "integer", "description": "Exact sites.id"},
-                    "site_name": {"type": "string", "description": "Partial site name match"},
-                    "status": {"type": "string", "description": "active, processing, completed"},
-                    "contains_lat": {"type": "number", "description": "Latitude for point-in-site filter"},
-                    "contains_lon": {"type": "number", "description": "Longitude for point-in-site filter"},
+                    "site_id": {
+                        "type": "integer",
+                        "description": "Filter by exact numeric site ID.",
+                    },
+                    "site_name": {
+                        "type": "string",
+                        "description": "Partial (case-insensitive) site name match. Only set when user names a specific site.",
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["active", "processing", "completed"],
+                        "description": (
+                            "Only set when user says the exact word 'active', 'processing', or 'completed'. "
+                            "Words like 'available', 'existing', 'all', 'every' are NOT a status filter — "
+                            "omit this field entirely in those cases."
+                        ),
+                    },
+                    "contains_lat": {
+                        "type": "number",
+                        "description": "Return only the site whose boundary contains this latitude.",
+                    },
+                    "contains_lon": {
+                        "type": "number",
+                        "description": "Paired with contains_lat for point-in-site lookup.",
+                    },
                     "building_id": {
                         "type": "integer",
-                        "description": "Return sites containing this turkey_buildings.osm_id",
+                        "description": "Return the site whose boundary contains this OSM building ID.",
                     },
-                    "limit": {"type": "integer", "description": "Rows to return (default 20, max 200)"},
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max rows to return (default 20, max 200).",
+                    },
                 },
             },
         },
@@ -385,8 +455,11 @@ COORDINATION_TOOLS: list[dict] = [
                     },
                     "assessment_id": {"type": "string", "description": "Single assessment id shortcut"},
                     "site_name": {"type": "string", "description": "Optional site_name filter for bulk dispatch"},
-                    "severity_min": {"type": "integer", "description": "Optional minimum severity filter"},
-                    "severity_max": {"type": "integer", "description": "Optional maximum severity filter"},
+                    "severity": {"type": "integer", "description": "Optional exact severity filter (= N)"},
+                    "severity_min": {"type": "integer", "description": "Optional severity >= N filter"},
+                    "severity_max": {"type": "integer", "description": "Optional severity <= N filter"},
+                    "severity_gt": {"type": "integer", "description": "Optional severity > N filter"},
+                    "severity_lt": {"type": "integer", "description": "Optional severity < N filter"},
                     "status": {"type": "string", "description": "Optional current status filter (default pending)"},
                     "limit": {"type": "integer", "description": "Bulk dispatch row limit (default 50, max 200)"},
                     "worker_name": {"type": "string", "description": "Optional worker name to assign"},
@@ -537,6 +610,26 @@ _TOOL_ALIASES: dict[str, str] = {
     "get_assessments_by_location": "get_assessments",
     "get_assessments_by_coords": "get_assessments",
     "get_assessments_by_point": "get_assessments",
+    "get_assessments_by_id": "get_assessments",
+    "get_assessments_by_assessment_id": "get_assessments",
+    "get_assessments_by_damage_type": "get_assessments",
+    "get_assessments_by_severity": "get_assessments",
+    "get_assessments_by_status": "get_assessments",
+    "get_assessments_by_structural_risk": "get_assessments",
+    "get_assessments_by_site": "get_assessments",
+    "get_assessments_by_site_name": "get_assessments",
+    "get_assessments_by_worker": "get_assessments",
+    "get_assessments_by_worker_name": "get_assessments",
+    "get_assessments_by_team": "get_assessments",
+    "get_assessments_by_province": "get_assessments",
+    "get_assessments_by_district": "get_assessments",
+    "get_assessments_filter": "get_assessments",
+    "get_assessment_by_id": "get_assessments",
+    "get_assessment": "get_assessments",
+    "filter_assessments": "get_assessments",
+    "search_assessments": "get_assessments",
+    "query_assessments": "get_assessments",
+    "list_assessments": "get_assessments",
     "find_assessments": "get_assessments",
 }
 
@@ -544,6 +637,52 @@ _TOOL_ALIASES: dict[str, str] = {
 def resolve_tool_name(name: str) -> str:
     """Return canonical tool name, resolving any known hallucinated aliases."""
     return _TOOL_ALIASES.get(name, name)
+
+
+def parse_colon_tool_call(
+    tool_name: str,
+    tool_args: dict[str, _Any],
+) -> tuple[str, dict[str, _Any]]:
+    """Parse hallucinated 'tool:param:value[:param:value...]' syntax.
+
+    Gemma4 sometimes embeds parameters inside the tool name itself using colon
+    notation, e.g. 'get_assessments:severity:5' with empty args {}.
+    This function detects that pattern, extracts the embedded param/value
+    pairs, and returns the canonical tool name + merged args dict.
+    """
+    if ":" not in tool_name:
+        return tool_name, tool_args
+
+    parts = tool_name.split(":")
+    base = parts[0]
+    canonical_base = _TOOL_ALIASES.get(base, base)
+
+    # Only proceed if the base is a known dispatched tool.
+    if canonical_base not in ALL_TOOL_NAMES:
+        return tool_name, tool_args
+
+    # Parts after the base must come in param/value pairs.
+    tail = parts[1:]
+    if len(tail) % 2 != 0 or not tail:
+        return tool_name, tool_args
+
+    extra_args: dict[str, _Any] = {}
+    for i in range(0, len(tail), 2):
+        param, raw_value = tail[i], tail[i + 1]
+        try:
+            extra_args[param] = int(raw_value)
+        except ValueError:
+            try:
+                extra_args[param] = float(raw_value)
+            except ValueError:
+                extra_args[param] = raw_value
+
+    merged = {**tool_args, **extra_args}
+    _logger.warning(
+        "tools.colon_tool_call_parsed original=%s canonical=%s extracted_args=%s merged_args=%s",
+        tool_name, canonical_base, extra_args, merged,
+    )
+    return canonical_base, merged
 
 
 def _normalise_tool_args(tool_name: str, tool_args: dict[_Any, _Any]) -> dict[str, _Any]:
@@ -590,6 +729,9 @@ async def dispatch_tool(
             tool_name, canonical, tool_args,
         )
         tool_name = canonical
+
+    # Detect and parse 'tool:param:value' colon-embedding hallucinations.
+    tool_name, tool_args = parse_colon_tool_call(tool_name, tool_args)
 
     # Normalise common parameter-name mistakes before routing.
     tool_args = _normalise_tool_args(tool_name, tool_args)
