@@ -416,6 +416,21 @@ const AI_CHAT_RESULT_FILL_LAYER_ID = "ai-chat-result-fill"
 const AI_CHAT_RESULT_LINE_LAYER_ID = "ai-chat-result-line"
 const AI_CHAT_RESULT_POINT_LAYER_ID = "ai-chat-result-point"
 
+// [fill, line/point, outline/stroke] — one deep distinct color per tool
+const TOOL_OVERLAY_COLORS: Record<string, [string, string, string]> = {
+  get_flood_zone:              ["#1E40AF", "#1E40AF", "#1e3a8a"],  // deep blue
+  get_nearest_shelter:         ["#7C3AED", "#7C3AED", "#5b21b6"],  // deep purple (route)
+  get_building_info:           ["#15803D", "#15803D", "#14532d"],  // deep green
+  get_assessments:             ["#DC2626", "#DC2626", "#991b1b"],  // deep red
+  get_sites:                   ["#0E7490", "#0E7490", "#164e63"],  // deep cyan
+  get_location_info_province:  ["#1D4ED8", "#1D4ED8", "#1e3a8a"],  // blue
+  get_location_info_district:  ["#6D28D9", "#6D28D9", "#4c1d95"],  // violet
+  get_location_info_point:     ["#0369A1", "#0369A1", "#0c4a6e"],  // sky blue
+  get_nearest_road:            ["#D97706", "#D97706", "#92400e"],  // deep amber
+  get_centroid:                ["#BE185D", "#BE185D", "#9d174d"],  // deep pink
+}
+const DEFAULT_OVERLAY_COLORS: [string, string, string] = ["#F59E0B", "#EA580C", "#B45309"]
+
 function createEmptyFeatureCollection(): GeoJsonFeatureCollection {
   return { type: "FeatureCollection", features: [] } as GeoJsonFeatureCollection
 }
@@ -434,6 +449,11 @@ function ensureAiChatResultLayers(map: maplibregl.Map): void {
     })
   }
 
+  // Data-driven color expressions — each feature carries its own _fill_color / _line_color / _stroke_color
+  const fillColorExpr = ["coalesce", ["get", "_fill_color"], DEFAULT_OVERLAY_COLORS[0]] as unknown as string
+  const lineColorExpr = ["coalesce", ["get", "_line_color"], DEFAULT_OVERLAY_COLORS[1]] as unknown as string
+  const strokeColorExpr = ["coalesce", ["get", "_stroke_color"], DEFAULT_OVERLAY_COLORS[2]] as unknown as string
+
   if (!map.getLayer(AI_CHAT_RESULT_FILL_LAYER_ID)) {
     map.addLayer({
       id: AI_CHAT_RESULT_FILL_LAYER_ID,
@@ -441,11 +461,14 @@ function ensureAiChatResultLayers(map: maplibregl.Map): void {
       source: AI_CHAT_RESULT_SOURCE_ID,
       filter: ["in", ["geometry-type"], ["literal", ["Polygon", "MultiPolygon"]]],
       paint: {
-        "fill-color": "#F59E0B",
+        "fill-color": fillColorExpr,
         "fill-opacity": 0.22,
-        "fill-outline-color": "#B45309",
+        "fill-outline-color": strokeColorExpr,
       },
     })
+  } else {
+    map.setPaintProperty(AI_CHAT_RESULT_FILL_LAYER_ID, "fill-color", fillColorExpr)
+    map.setPaintProperty(AI_CHAT_RESULT_FILL_LAYER_ID, "fill-outline-color", strokeColorExpr)
   }
 
   if (!map.getLayer(AI_CHAT_RESULT_LINE_LAYER_ID)) {
@@ -455,11 +478,13 @@ function ensureAiChatResultLayers(map: maplibregl.Map): void {
       source: AI_CHAT_RESULT_SOURCE_ID,
       filter: ["in", ["geometry-type"], ["literal", ["LineString", "MultiLineString"]]],
       paint: {
-        "line-color": "#EA580C",
-        "line-width": 3,
+        "line-color": lineColorExpr,
+        "line-width": 4,
         "line-opacity": 0.95,
       },
     })
+  } else {
+    map.setPaintProperty(AI_CHAT_RESULT_LINE_LAYER_ID, "line-color", lineColorExpr)
   }
 
   if (!map.getLayer(AI_CHAT_RESULT_POINT_LAYER_ID)) {
@@ -469,12 +494,15 @@ function ensureAiChatResultLayers(map: maplibregl.Map): void {
       source: AI_CHAT_RESULT_SOURCE_ID,
       filter: ["in", ["geometry-type"], ["literal", ["Point", "MultiPoint"]]],
       paint: {
-        "circle-color": "#EA580C",
-        "circle-radius": 5,
-        "circle-stroke-color": "#7C2D12",
-        "circle-stroke-width": 1.5,
+        "circle-color": fillColorExpr,
+        "circle-radius": 6,
+        "circle-stroke-color": strokeColorExpr,
+        "circle-stroke-width": 2,
       },
     })
+  } else {
+    map.setPaintProperty(AI_CHAT_RESULT_POINT_LAYER_ID, "circle-color", fillColorExpr)
+    map.setPaintProperty(AI_CHAT_RESULT_POINT_LAYER_ID, "circle-stroke-color", strokeColorExpr)
   }
 }
 
@@ -565,17 +593,20 @@ function extractFeaturesFromChatToolResult(
 ): ChatToolGeometryExtraction {
   const overlayName = getOverlayNameFromToolResult(toolName, result)
   const features: GeoJsonFeatureCollection["features"] = []
+
   const pushFeature = (
     geometryCandidate: unknown,
     properties: Record<string, unknown>,
-    idSuffix: string
+    idSuffix: string,
+    colorKey?: string,
   ) => {
     if (!isGeometryCandidate(geometryCandidate)) return
+    const [fc, lc, sc] = TOOL_OVERLAY_COLORS[colorKey ?? toolName] ?? DEFAULT_OVERLAY_COLORS
     features.push({
       type: "Feature",
       id: `${toolName}-${idSuffix}`,
       geometry: geometryCandidate as never,
-      properties: { tool_name: toolName, ...properties },
+      properties: { tool_name: toolName, _fill_color: fc, _line_color: lc, _stroke_color: sc, ...properties },
     })
   }
 
@@ -583,7 +614,12 @@ function extractFeaturesFromChatToolResult(
     result.items.forEach((item, index) => {
       if (!item || typeof item !== "object") return
       const row = item as Record<string, unknown>
-      pushFeature(row.boundary_geojson, { label: row.name ?? "Site boundary", source: "get_sites" }, `site-${index}`)
+      pushFeature(row.boundary_geojson, {
+        label: row.name ?? "Site boundary",
+        site_name: row.name,
+        building_count: row.building_count,
+        area_m2: row.area_m2,
+      }, `site-${index}`)
     })
     return { overlayName, features }
   }
@@ -592,7 +628,15 @@ function extractFeaturesFromChatToolResult(
     result.items.forEach((item, index) => {
       if (!item || typeof item !== "object") return
       const row = item as Record<string, unknown>
-      pushFeature(row.geom_geojson, { label: row.id ?? "Assessment", source: "get_assessments" }, `assessment-${index}`)
+      pushFeature(row.geom_geojson, {
+        label: row.id ?? "Assessment",
+        assessment_id: row.id,
+        severity: row.severity,
+        damage_type: row.damage_type,
+        status: row.status,
+        recommended_action: row.recommended_action,
+        structural_risk: row.structural_risk,
+      }, `assessment-${index}`)
     })
     return { overlayName, features }
   }
@@ -601,7 +645,13 @@ function extractFeaturesFromChatToolResult(
     const floodZoneData = result.flood_zone_data
     if (floodZoneData && typeof floodZoneData === "object") {
       const flood = floodZoneData as Record<string, unknown>
-      pushFeature(flood.geom_geojson, { label: flood.waterway_name ?? "Flood zone", source: "get_flood_zone" }, "flood-zone")
+      pushFeature(flood.geom_geojson, {
+        label: flood.waterway_name ?? "Flood zone",
+        in_flood_zone: result.in_flood_zone,
+        waterway_name: flood.waterway_name,
+        distance_to_waterway_m: result.distance_to_waterway_m,
+        return_period: result.return_period,
+      }, "flood-zone")
     }
     return { overlayName, features }
   }
@@ -610,7 +660,14 @@ function extractFeaturesFromChatToolResult(
     const buildingData = result.building_data
     if (buildingData && typeof buildingData === "object") {
       const building = buildingData as Record<string, unknown>
-      pushFeature(building.geom_geojson, { label: building.osm_id ?? "Building", source: "get_building_info" }, "building")
+      pushFeature(building.geom_geojson, {
+        label: building.osm_id ?? "Building",
+        osm_id: building.osm_id,
+        building_type: building.building,
+        floors: building.building_levels,
+        material: building.building_material,
+        roof_type: building.roof_shape,
+      }, "building")
     }
     return { overlayName, features }
   }
@@ -621,29 +678,139 @@ function extractFeaturesFromChatToolResult(
     const nearestPointData = result.nearest_point_data
     if (provinceData && typeof provinceData === "object") {
       const province = provinceData as Record<string, unknown>
-      pushFeature(province.geom_geojson, { label: province.name_en ?? province.name_tr ?? "Province", source: "get_location_info" }, "province")
+      pushFeature(province.geom_geojson, {
+        label: province.name_en ?? province.name_tr ?? "Province",
+        province: province.name_en ?? province.name_tr,
+      }, "province", "get_location_info_province")
     }
     if (districtData && typeof districtData === "object") {
       const district = districtData as Record<string, unknown>
-      pushFeature(district.geom_geojson, { label: district.district ?? "District", source: "get_location_info" }, "district")
+      pushFeature(district.geom_geojson, {
+        label: district.district ?? "District",
+        district: district.district,
+      }, "district", "get_location_info_district")
     }
     if (nearestPointData && typeof nearestPointData === "object") {
       const point = nearestPointData as Record<string, unknown>
-      pushFeature(point.geom_geojson, { label: point.name ?? "Nearest point", source: "get_location_info" }, "nearest-point")
+      pushFeature(point.geom_geojson, {
+        label: point.name ?? "Nearest point",
+        name: point.name,
+        amenity: point.amenity,
+      }, "nearest-point", "get_location_info_point")
     }
     return { overlayName, features }
   }
 
   if (toolName === "get_nearest_shelter") {
-    pushFeature(
-      result.route_geometry_geojson,
-      { label: "Route to shelter", source: "get_nearest_shelter" },
-      "shelter-route"
-    )
+    pushFeature(result.route_geometry_geojson, {
+      label: result.route_name ?? "Route to shelter",
+      shelter_name: result.name,
+      shelter_type: result.shelter_type,
+      shelter_description: result.shelter_description,
+      distance_m: result.distance_m,
+      route_distance_m: result.route_distance_m,
+      route_duration_s: result.route_duration_s,
+      nearest_road: result.nearest_road,
+    }, "shelter-route")
     return { overlayName, features }
   }
 
   return { overlayName, features }
+}
+
+// ── AI overlay info panel ──────────────────────────────────────────────────
+
+const AI_OVERLAY_TOOL_ICONS: Record<string, string> = {
+  get_flood_zone: "🌊", get_nearest_shelter: "🏥", get_building_info: "🏢",
+  get_assessments: "📋", get_sites: "🗺️", get_location_info: "📍",
+  get_nearest_road: "🛣️", get_centroid: "📌", get_elevation_slope: "⛰️",
+}
+const AI_OVERLAY_TOOL_LABELS: Record<string, string> = {
+  get_flood_zone: "Flood Zone", get_nearest_shelter: "Shelter Route",
+  get_building_info: "Building", get_assessments: "Assessment",
+  get_sites: "Site", get_location_info: "Location",
+  get_nearest_road: "Nearest Road", get_centroid: "Centroid", get_elevation_slope: "Elevation",
+}
+
+function formatAiPropValue(key: string, value: unknown): string {
+  if (value == null || value === "") return ""
+  if (typeof value === "boolean") return value ? "Yes" : "No"
+  if (typeof value === "number") {
+    if (key.includes("distance_m") || key === "distance_m") return value >= 1000 ? `${(value / 1000).toFixed(2)} km` : `${Math.round(value)} m`
+    if (key.includes("route_distance")) return value >= 1000 ? `${(value / 1000).toFixed(2)} km` : `${Math.round(value)} m`
+    if (key.includes("duration_s") || key.includes("_s")) return value >= 60 ? `${Math.round(value / 60)} min` : `${Math.round(value)} s`
+    if (key.includes("area_m2")) return `${(value / 10000).toFixed(2)} ha`
+    return String(Math.round(value * 100) / 100)
+  }
+  return String(value)
+}
+
+function AiOverlayInfoPanel({
+  info,
+  onClose,
+}: {
+  info: { properties: Record<string, unknown>; lat: number; lon: number } | null
+  onClose: () => void
+}) {
+  if (!info) return null
+  const { properties, lat, lon } = info
+  const toolName = String(properties.tool_name ?? "")
+  const label    = String(properties.label ?? "Feature")
+  const color    = String(properties._line_color ?? properties._fill_color ?? "#6b7280")
+  const icon     = AI_OVERLAY_TOOL_ICONS[toolName] ?? "🔧"
+  const toolLabel = AI_OVERLAY_TOOL_LABELS[toolName] ?? toolName.replace(/_/g, " ")
+
+  const SKIP_KEYS = new Set(["tool_name", "label", "_fill_color", "_line_color", "_stroke_color", "overlay_id", "overlay_name"])
+  const displayEntries = Object.entries(properties).filter(
+    ([k, v]) => !SKIP_KEYS.has(k) && v != null && v !== "" && String(v).trim() !== ""
+  )
+
+  return (
+    <div className="absolute right-4 top-16 z-30 w-72 overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl">
+      {/* Header */}
+      <div
+        className="flex items-center gap-2 px-3 py-2.5"
+        style={{ backgroundColor: `${color}18`, borderBottom: `2px solid ${color}` }}
+      >
+        <span className="shrink-0 text-base">{icon}</span>
+        <div className="min-w-0 flex-1">
+          <p className="text-xs font-semibold text-gray-900">{toolLabel}</p>
+          <p className="truncate text-[10px] text-gray-500">{label}</p>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded p-1 text-gray-400 hover:bg-black/10"
+        >
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+            <path d="M1 1l10 10M11 1L1 11" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+          </svg>
+        </button>
+      </div>
+
+      {/* Properties */}
+      <div className="max-h-80 overflow-y-auto divide-y divide-gray-50 px-3 py-2">
+        {displayEntries.map(([key, value]) => {
+          const formatted = formatAiPropValue(key, value)
+          if (!formatted) return null
+          return (
+            <div key={key} className="flex items-start justify-between gap-2 py-1">
+              <span className="shrink-0 capitalize text-[10px] font-medium text-gray-400">
+                {key.replace(/_/g, " ")}
+              </span>
+              <span className="text-right text-[11px] text-gray-800 break-all">{formatted}</span>
+            </div>
+          )
+        })}
+        <div className="flex items-start justify-between gap-2 py-1">
+          <span className="shrink-0 text-[10px] font-medium text-gray-400">Location</span>
+          <span className="text-right font-mono text-[10px] text-gray-600">
+            {lat.toFixed(5)}, {lon.toFixed(5)}
+          </span>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 // This component renders the PMTiles basemap with a single-button AI chat sidebar.
@@ -692,6 +859,14 @@ export function FieldMapView() {
 
   // This variable stores the feature info shown in the right-hand details sidebar.
   const [selectedFeatureInfo, setSelectedFeatureInfo] = useState<SelectedFeatureInfo | null>(null)
+
+  // AI overlay click info panel
+  const [selectedAiOverlay, setSelectedAiOverlay] = useState<{
+    properties: Record<string, unknown>
+    lat: number
+    lon: number
+  } | null>(null)
+  const aiClickHandlerAddedRef = useRef(false)
 
   // ── Draw polygon for batch analysis ──────────────────────────────────────
   const [drawMode, setDrawMode] = useState(false)
@@ -756,7 +931,8 @@ export function FieldMapView() {
   // ── Single building analysis drawer ──────────────────────────────────────
   const [buildingDrawer, setBuildingDrawer] = useState<{
     osmId: number; lat: number; lon: number; batchId: string | null
-    events: BuildingEvent[]; done: boolean; aiThought?: string; aiStage?: string; progressPercent: number; progressLabel?: string
+    events: BuildingEvent[]; done: boolean; aiThought?: string; aiStage?: string
+    progressPercent: number; progressLabel?: string; tokensUsed: number
   } | null>(null)
   const [singleWasStopped, setSingleWasStopped] = useState(false)
   // One card per site name: `/batch/pending` can return several rows per label (retry runs share `site_name`).
@@ -1143,6 +1319,9 @@ export function FieldMapView() {
             }
             if (ev.type === "building_skipped") {
               const osmId = Number(ev.osm_id)
+              const skipThought = ev.reason === "no_orthophoto_coverage"
+                ? "Building is outside the uploaded orthophoto coverage area."
+                : "Building skipped (already assessed)."
               setProcessingOsmIds((prevIds) => prevIds.filter((id) => id !== osmId))
               setBatchBuildingProgress((prevProgress) => ({
                 ...prevProgress,
@@ -1157,7 +1336,7 @@ export function FieldMapView() {
                   }),
                   progressPercent: 100,
                   stage: "skipped",
-                  thought: "Building skipped (already assessed).",
+                  thought: skipThought,
                   status: "skipped",
                   updatedAt: Date.now(),
                 },
@@ -1165,7 +1344,7 @@ export function FieldMapView() {
               return {
                 ...base,
                 skipped: base.skipped + 1,
-                events: [...base.events, { osm_id: osmId, status: "skipped" }],
+                events: [...base.events, { osm_id: osmId, status: "skipped", error: ev.reason === "no_orthophoto_coverage" ? "no_orthophoto_coverage" : undefined }],
               }
             }
             if (ev.type === "batch_complete") {
@@ -1699,6 +1878,9 @@ export function FieldMapView() {
             }
             if (ev.type === "building_skipped") {
               const osmId = Number(ev.osm_id)
+              const skipThought = ev.reason === "no_orthophoto_coverage"
+                ? "Building is outside the uploaded orthophoto coverage area."
+                : "Building skipped (already assessed)."
               setProcessingOsmIds((prev) => prev.filter((id) => id !== osmId))
               setBatchBuildingProgress((prevProgress) => ({
                 ...prevProgress,
@@ -1713,12 +1895,12 @@ export function FieldMapView() {
                   }),
                   progressPercent: 100,
                   stage: "skipped",
-                  thought: "Building skipped (already assessed).",
+                  thought: skipThought,
                   status: "skipped",
                   updatedAt: Date.now(),
                 },
               }))
-              return { ...base, skipped: base.skipped + 1, events: [...base.events, { osm_id: ev.osm_id as number, status: "skipped" }] }
+              return { ...base, skipped: base.skipped + 1, events: [...base.events, { osm_id: ev.osm_id as number, status: "skipped", error: ev.reason === "no_orthophoto_coverage" ? "no_orthophoto_coverage" : undefined }] }
             }
             if (ev.type === "batch_complete") {
               setCurrentAiStage(null)
@@ -1842,8 +2024,10 @@ export function FieldMapView() {
       done: false,
       progressPercent: 5,
       progressLabel: "Queued for analysis",
+      tokensUsed: 0,
     })
     setSingleWasStopped(false)
+    setIsChatSidebarOpen(true)
     try {
       if (singleBuildingStreamCleanupRef.current) {
         singleBuildingStreamCleanupRef.current()
@@ -1924,6 +2108,7 @@ export function FieldMapView() {
                 aiStage: undefined,
                 progressPercent: 100,
                 progressLabel: "Analysis complete",
+                tokensUsed: prev.tokensUsed + (ev.total_tokens ? Number(ev.total_tokens) : 0),
                 events: [...prev.events, { osm_id: ev.osm_id as number, status: "done", assessment_id: ev.assessment_id as string, severity: ev.severity as number, chip_path: ev.chip_path as string, pre_chip_path: ev.pre_chip_path as string | undefined }],
               }
             }
@@ -2022,6 +2207,22 @@ export function FieldMapView() {
       return
     }
     ensureAiChatResultLayers(map)
+
+    // Register click + cursor handlers for AI overlay layers once
+    if (!aiClickHandlerAddedRef.current) {
+      aiClickHandlerAddedRef.current = true
+      const handleAiClick = (e: maplibregl.MapLayerMouseEvent) => {
+        if (!e.features || e.features.length === 0) return
+        const props = (e.features[0].properties ?? {}) as Record<string, unknown>
+        setSelectedAiOverlay({ properties: props, lat: e.lngLat.lat, lon: e.lngLat.lng })
+      }
+      const setCursor = (cursor: string) => () => { map.getCanvas().style.cursor = cursor }
+      for (const layerId of [AI_CHAT_RESULT_FILL_LAYER_ID, AI_CHAT_RESULT_LINE_LAYER_ID, AI_CHAT_RESULT_POINT_LAYER_ID]) {
+        map.on("click", layerId, handleAiClick)
+        map.on("mouseenter", layerId, setCursor("pointer"))
+        map.on("mouseleave", layerId, setCursor(""))
+      }
+    }
 
     const mergedFeatures = chatGeometryOverlaysRef.current.flatMap((overlay) =>
       overlay.visible
@@ -2383,6 +2584,12 @@ export function FieldMapView() {
               }
               if (ev.type === "building_skipped") {
                 const osmId = Number(ev.osm_id)
+                const skipThought = ev.reason === "no_orthophoto_coverage"
+                  ? "Building is outside the uploaded orthophoto coverage area."
+                  : "Building skipped (already assessed)."
+                const skipError = ev.reason === "no_orthophoto_coverage"
+                  ? "no_orthophoto_coverage"
+                  : undefined
                 setProcessingOsmIds((prevIds) => prevIds.filter((id) => id !== osmId))
                 setBatchBuildingProgress((prevProgress) => ({
                   ...prevProgress,
@@ -2397,12 +2604,12 @@ export function FieldMapView() {
                     }),
                     progressPercent: 100,
                     stage: "skipped",
-                    thought: "Building skipped (already assessed).",
+                    thought: skipThought,
                     status: "skipped",
                     updatedAt: Date.now(),
                   },
                 }))
-                return { ...base, skipped: base.skipped + 1, events: [...base.events, { osm_id: ev.osm_id as number, status: "skipped" }] }
+                return { ...base, skipped: base.skipped + 1, events: [...base.events, { osm_id: ev.osm_id as number, status: "skipped", error: skipError }] }
               }
               if (ev.type === "batch_complete") {
                 setCurrentAiStage(null)
@@ -3908,26 +4115,52 @@ export function FieldMapView() {
         onToolResult={handleChatToolResult}
         selectedBuildingContext={selectedBuildingChatContext}
         onClearSelectedBuildingContext={() => setSelectedBuildingChatContext(null)}
-        activeBatch={activeBatchId && batchProgress ? {
-          batchId: activeBatchId,
-          siteName: activeBatchSiteName,
-          total: batchProgress.total,
-          processed: batchProgress.processed,
-          failed: batchProgress.failed,
-          skipped: batchProgress.skipped,
-          done: batchDone,
-          stopped: batchWasStopped,
-          tokensUsed: batchTokensUsed,
-          events: batchProgress.events.map((e) => ({
-            osm_id: e.osm_id,
-            status: e.status as "done" | "skipped" | "failed",
-            severity: e.severity,
-            error: e.error,
-          })),
-          currentOsmId: currentAiStage?.osm_id ?? null,
-          currentStage: currentAiStage?.stage ?? "",
-          currentThought: currentThinkingFull || currentAiStage?.thought || "",
-        } : null}
+        activeBatch={
+          // Individual building analysis takes priority over site batch
+          buildingDrawer
+            ? {
+                batchId: buildingDrawer.batchId ?? "",
+                siteName: `OSM:${buildingDrawer.osmId}`,
+                total: 1,
+                processed: buildingDrawer.events.filter((e) => e.status === "done").length,
+                failed: buildingDrawer.events.filter((e) => e.status === "failed").length,
+                skipped: buildingDrawer.events.filter((e) => e.status === "skipped").length,
+                done: buildingDrawer.done,
+                stopped: singleWasStopped,
+                tokensUsed: buildingDrawer.tokensUsed,
+                events: buildingDrawer.events.map((e) => ({
+                  osm_id: e.osm_id,
+                  status: e.status as "done" | "skipped" | "failed",
+                  severity: e.severity,
+                  error: e.error,
+                })),
+                currentOsmId: buildingDrawer.done ? null : buildingDrawer.osmId,
+                currentStage: buildingDrawer.aiStage ?? "",
+                currentThought: buildingDrawer.aiThought ?? "",
+              }
+            : activeBatchId && batchProgress
+            ? {
+                batchId: activeBatchId,
+                siteName: activeBatchSiteName,
+                total: batchProgress.total,
+                processed: batchProgress.processed,
+                failed: batchProgress.failed,
+                skipped: batchProgress.skipped,
+                done: batchDone,
+                stopped: batchWasStopped,
+                tokensUsed: batchTokensUsed,
+                events: batchProgress.events.map((e) => ({
+                  osm_id: e.osm_id,
+                  status: e.status as "done" | "skipped" | "failed",
+                  severity: e.severity,
+                  error: e.error,
+                })),
+                currentOsmId: currentAiStage?.osm_id ?? null,
+                currentStage: currentAiStage?.stage ?? "",
+                currentThought: currentThinkingFull || currentAiStage?.thought || "",
+              }
+            : null
+        }
       />
 
       <FeatureInfoSidebar
@@ -3935,6 +4168,11 @@ export function FieldMapView() {
         onClose={handleCloseFeatureInfoSidebar}
         onAnalyseBuilding={handleAnalyseBuilding}
         onAskAiAboutBuilding={handleAskAiAboutBuilding}
+      />
+
+      <AiOverlayInfoPanel
+        info={selectedAiOverlay}
+        onClose={() => setSelectedAiOverlay(null)}
       />
     </div>
   )

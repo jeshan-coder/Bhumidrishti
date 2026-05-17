@@ -12,8 +12,9 @@ import { ToolCallCard, toolResultSummary, type ToolCallStatus, type ActiveBatch,
 // ── Batch chat stream ──────────────────────────────────────────────────────
 
 function BatchChatStream({ batch }: { batch: ActiveBatch }) {
+  const isSingle  = batch.total === 1
   const doneCount = batch.processed + batch.failed + batch.skipped
-  const pct = batch.total > 0 ? Math.round((doneCount / batch.total) * 100) : 0
+  const pct       = batch.total > 0 ? Math.round((doneCount / batch.total) * 100) : 0
 
   return (
     <div className="space-y-1.5">
@@ -31,12 +32,18 @@ function BatchChatStream({ batch }: { batch: ActiveBatch }) {
             batch.done ? (batch.stopped ? "text-zinc-600" : "text-emerald-900") : "text-blue-900"
           }`}>
             {batch.done
-              ? batch.stopped ? "Batch stopped" : "Analysis complete"
+              ? batch.stopped
+                ? isSingle ? "Analysis stopped" : "Batch stopped"
+                : "Analysis complete"
+              : isSingle
+              ? `Analysing — ${batch.siteName}`
               : `Analysing — ${batch.siteName || "site"}`}
           </span>
-          <span className={`ml-auto font-mono text-[10px] ${batch.done ? "text-zinc-400" : "text-blue-500"}`}>
-            {doneCount}/{batch.total}
-          </span>
+          {!isSingle && (
+            <span className={`ml-auto font-mono text-[10px] ${batch.done ? "text-zinc-400" : "text-blue-500"}`}>
+              {doneCount}/{batch.total}
+            </span>
+          )}
         </div>
         <div className="h-1 overflow-hidden rounded-full bg-white/70">
           <div
@@ -81,7 +88,11 @@ function BatchChatStream({ batch }: { batch: ActiveBatch }) {
           {ev.severity != null && (
             <span className="ml-auto font-semibold text-[10px]">SEV {ev.severity}</span>
           )}
-          {ev.status === "skipped" && <span className="ml-auto text-[10px]">skipped</span>}
+          {ev.status === "skipped" && (
+            <span className="ml-auto text-[10px]">
+              {ev.error === "no_orthophoto_coverage" ? "no coverage" : "skipped"}
+            </span>
+          )}
           {ev.status === "failed" && ev.error && (
             <span className="ml-auto max-w-[14ch] truncate text-[10px]">{ev.error}</span>
           )}

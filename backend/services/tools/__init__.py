@@ -193,7 +193,10 @@ ASSESSMENT_TOOLS: list[dict] = [
                 "Resolve any named entity or geometry to its centroid lat/lon coordinates. "
                 "Use this as a bridge when another tool only accepts lat/lon but you have a "
                 "site name, site ID, OSM building ID, or raw GeoJSON geometry. "
-                "Call get_centroid first, then pass the returned lat/lon to the target tool. "
+                "CRITICAL USAGE RULE: Call this tool AT MOST ONCE per response. "
+                "After you receive the lat and lon from this tool, immediately use those "
+                "exact values for ALL subsequent tool calls — never call get_centroid again "
+                "in the same response for the same or any related geometry. "
                 "Supports: named sites (site_name / site_id), OSM buildings (osm_id), "
                 "and arbitrary GeoJSON geometries (geometry)."
             ),

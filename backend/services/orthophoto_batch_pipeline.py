@@ -935,14 +935,17 @@ async def run_orthophoto_batch(
                     chips_dir,
                 )
             except BuildingOutsideOrthoError as exc:
-                failed += 1
+                # Building is outside the uploaded orthophoto coverage area.
+                # ground_data is None here (otherwise PATH A/B would have handled it).
+                # Treat as skipped — no data available, not an analysis error.
+                skipped += 1
                 await _update_batch_progress(pool, batch_id, processed, failed, skipped)
                 await _push_event(batch_id, {
-                    "type": "building_failed",
+                    "type": "building_skipped",
                     "batch_id": batch_id,
                     "osm_id": osm_id,
-                    "error": "building_outside_ortho_bounds",
-                    "status": "failed",
+                    "reason": "no_orthophoto_coverage",
+                    "status": "skipped",
                 })
                 logger.info("batch_building_outside_ortho osm_id=%s error=%s", osm_id, exc)
                 continue
