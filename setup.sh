@@ -77,6 +77,31 @@ else
   exit 1
 fi
 
+# ── Fix Docker credential-store issues (common in WSL / fresh installs) ───────
+# When Docker Desktop sets credsStore=desktop but docker-credential-desktop is
+# not reachable from WSL, every image pull/build fails with
+# "error getting credentials - err: exit status 1"
+# Fix: remove the broken credsStore entry so Docker falls back to anonymous.
+DOCKER_CFG="${HOME}/.docker/config.json"
+if [ -f "${DOCKER_CFG}" ] && grep -q '"credsStore"' "${DOCKER_CFG}" 2>/dev/null; then
+  CREDS_HELPER=$(python3 -c "import json,sys; d=json.load(open('${DOCKER_CFG}')); print(d.get('credsStore',''))" 2>/dev/null || echo "")
+  if [ -n "${CREDS_HELPER}" ]; then
+    # Test if the helper is actually reachable
+    if ! command -v "docker-credential-${CREDS_HELPER}" &>/dev/null && \
+       ! command -v "docker-credential-${CREDS_HELPER}.exe" &>/dev/null; then
+      warn "Docker credential helper '${CREDS_HELPER}' not found — removing from config to allow image pulls."
+      cp "${DOCKER_CFG}" "${DOCKER_CFG}.bak"
+      python3 -c "
+import json
+with open('${DOCKER_CFG}') as f: cfg = json.load(f)
+cfg.pop('credsStore', None)
+with open('${DOCKER_CFG}', 'w') as f: json.dump(cfg, f, indent=2)
+"
+      ok "Credential store fixed. Backup at ~/.docker/config.json.bak"
+    fi
+  fi
+fi
+
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 2 — NVIDIA GPU / Container Toolkit
 # ─────────────────────────────────────────────────────────────────────────────
