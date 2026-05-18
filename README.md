@@ -47,6 +47,36 @@ That's it. No other manual steps required.
 
 ---
 
+## Important — 10 GB Offline Data
+
+BhumiDrishti works **fully offline** after setup. To make this possible, it requires ~10 GB of geospatial data (satellite imagery, DEMs, building shapefiles, road network, base map tiles) for the Turkey earthquake region.
+
+**The setup script downloads this automatically.** However, if the Google Drive download fails (quota exceeded, slow connection, etc.), you can download the data manually:
+
+1. Download the zip from Google Drive:  
+   **[bhumidrishti_data.zip (~10 GB)](https://drive.google.com/uc?id=1vDWLi18YpW0o8s54FrV7mNO3XjBBpJ_K)**
+
+2. Save the file as **`bhumidrishti_data.zip`** directly inside the cloned project folder:
+   ```
+   Bhumidrishti/
+   └── bhumidrishti_data.zip   ← place it here
+   ```
+
+3. Re-run `./setup.sh` — it will detect the zip, skip the download, and extract automatically.
+
+The extracted data lands in `data/` with this structure:
+```
+Bhumidrishti/
+└── data/
+    ├── turkey_data/
+    │   ├── Adiyaman/           # pre/post COGs, DEM, buildings
+    │   └── Hatay/              # pre/post COGs, DEM, buildings
+    ├── osrm/                   # Turkey road network routing files
+    └── tiles_data/             # PMTiles base map + TileServer config
+```
+
+---
+
 ## What the Setup Script Does
 
 | Step | Action | Time |
