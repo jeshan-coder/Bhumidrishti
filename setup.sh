@@ -232,7 +232,51 @@ if [ "$DATA_EXTRACTED" = false ]; then
     ok "gdown ready"
 
     echo "  Downloading data zip (10-30 min)..."
-    $PYTHON_CMD -m gdown "${GDRIVE_FILE_ID}" -O "${ZIP_PATH}"
+    GDOWN_LOG="/tmp/gdown_$$.log"
+
+    # Run gdown, capture output (show it AND save for quota-error detection)
+    set +o pipefail
+    $PYTHON_CMD -m gdown "${GDRIVE_FILE_ID}" -O "${ZIP_PATH}" 2>&1 | tee "$GDOWN_LOG"
+    GDOWN_OK=${PIPESTATUS[0]}
+    set -o pipefail
+
+    if [ "$GDOWN_OK" -ne 0 ]; then
+      if grep -qi "too many users\|quota\|try again later\|shared too widely\|file url" "$GDOWN_LOG"; then
+        warn "Google Drive quota exceeded. Trying direct usercontent URL..."
+
+        DIRECT_URL="https://drive.usercontent.google.com/download?id=${GDRIVE_FILE_ID}&export=download&authuser=0&confirm=t"
+        FALLBACK_OK=false
+
+        if command -v wget &>/dev/null; then
+          if wget --no-check-certificate --progress=bar:force:noscroll \
+               -O "${ZIP_PATH}" "${DIRECT_URL}" 2>&1; then
+            FALLBACK_OK=true
+          fi
+        fi
+
+        if [ "$FALLBACK_OK" = false ] && command -v curl &>/dev/null; then
+          if curl -L --progress-bar -o "${ZIP_PATH}" "${DIRECT_URL}"; then
+            FALLBACK_OK=true
+          fi
+        fi
+
+        if [ "$FALLBACK_OK" = false ]; then
+          rm -f "${ZIP_PATH}"
+          fail "All automatic download methods failed (Google Drive quota exceeded)."
+          echo ""
+          echo "  To continue manually:"
+          echo "    1. Open this URL in a browser and download the file:"
+          echo "       https://drive.google.com/uc?id=${GDRIVE_FILE_ID}"
+          echo "    2. Save it as:  ${ZIP_PATH}"
+          echo "    3. Re-run ./setup.sh — it will detect the zip and skip the download."
+          exit 1
+        fi
+      else
+        rm -f "${ZIP_PATH}"
+        fail "Download failed. Check your internet connection and try again."
+        exit 1
+      fi
+    fi
     ok "Download complete: ${DATA_ZIP}"
   fi
 
