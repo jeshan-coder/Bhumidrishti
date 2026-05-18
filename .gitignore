@@ -4,6 +4,11 @@ Thumbs.db
 .vscode/
 .idea/
 
+# AI editor / IDE config (local only)
+.claude/
+.cursor/
+.windsurf/
+
 # Environment files
 .env
 .env.*
