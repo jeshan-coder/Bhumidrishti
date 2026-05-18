@@ -1,6 +1,6 @@
 # BhumiDrishti — Offline AI Disaster Assessment Platform
 
-> **Offline-first** field coordination and disaster damage assessment powered by local AI (Gemma 4 via Ollama), PostGIS spatial analysis, and drone orthophoto processing — no internet required after setup.
+> **Offline-first** field coordination and disaster damage assessment powered by local AI (**Gemma 4 e4b** via Ollama), PostGIS spatial analysis, and drone orthophoto processing — no internet required after setup.
 
 ---
 
@@ -10,12 +10,12 @@
 
 | Component | Minimum | Recommended |
 |-----------|---------|-------------|
-| GPU | NVIDIA 8 GB VRAM | NVIDIA 16+ GB VRAM |
+| GPU | NVIDIA 6 GB VRAM | NVIDIA 8+ GB VRAM |
 | RAM | 16 GB | 32 GB |
 | Disk | 30 GB free | 60+ GB free |
 | CPU | 4 cores | 8+ cores |
 
-> **No GPU?** The system will run in CPU-only mode. AI inference will be very slow (minutes per assessment instead of seconds).
+> **No GPU?** The system will run in CPU-only mode. AI inference will be very slow (minutes per assessment instead of seconds). A GPU with at least 6 GB VRAM is strongly recommended.
 
 ### Software
 
@@ -24,17 +24,25 @@
 | Docker Desktop / Engine | 24+ | With Compose v2 plugin |
 | NVIDIA Driver | 525+ | For GPU acceleration |
 | NVIDIA Container Toolkit | Latest | For GPU access inside Docker |
-| Python 3 + pip | 3.8+ | For `gdown` (auto-installed by setup script) |
+| Python 3 + pip | 3.8+ | For `gdown` — auto-installed by setup script |
 
 ---
 
-## Quick Start
+## Quick Start — One Command
+
+The setup script handles **everything automatically**:
+- Checks Docker and GPU
+- Creates `.env` config files
+- Downloads ~10 GB data from Google Drive
+- Verifies all required data files
+- Builds OSRM routing files if needed
+- Launches all Docker services
 
 ### Linux / macOS
 
 ```bash
-git clone <your-repo-url> BhumiDrishti
-cd BhumiDrishti
+git clone https://github.com/jeshan-coder/Bhumidrishti.git
+cd Bhumidrishti
 chmod +x setup.sh
 ./setup.sh
 ```
@@ -42,113 +50,68 @@ chmod +x setup.sh
 ### Windows (PowerShell)
 
 ```powershell
-git clone <your-repo-url> BhumiDrishti
-cd BhumiDrishti
+git clone https://github.com/jeshan-coder/Bhumidrishti.git
+cd Bhumidrishti
 powershell -ExecutionPolicy Bypass -File setup.ps1
 ```
 
-### What the setup script does
-
-| Step | Action |
-|------|--------|
-| 1 | Verify Docker + Docker Compose are installed and running |
-| 2 | Detect NVIDIA GPU and Container Toolkit |
-| 3 | Download ~10 GB data zip from Google Drive (skipped if already present) |
-| 4 | Create required directories (`uploads/`, `data/osrm/`, etc.) |
-| 5 | Verify all critical data files (COGs, shapefiles, PMTiles) |
-| 6 | Check OSRM routing files; rebuild from PBF if missing (~40 min) |
-| 7 | Run `docker compose up --build -d` |
+That's it. No other manual steps required.
 
 ---
 
-## Manual Setup (without the script)
+## What the Setup Script Does
 
-If you prefer to set up manually or the script fails at a specific step:
+| Step | Action | Time |
+|------|--------|------|
+| 1 | Check Docker + Docker Compose | ~5 sec |
+| 2 | Detect NVIDIA GPU + Container Toolkit | ~5 sec |
+| 3 | Create `backend/.env` and `frontend/.env.local` from examples | ~2 sec |
+| 4 | Download ~10 GB data zip from Google Drive | 10–30 min |
+| 5 | Create required directories | ~2 sec |
+| 6 | Verify all critical data files (COGs, shapefiles, PMTiles) | ~5 sec |
+| 7 | Check OSRM routing files; rebuild from PBF if missing | 0 or ~40 min |
+| 8 | `docker compose up --build -d` | 5–10 min |
 
-### 1. Clone and prepare directories
+After step 8 completes, Ollama downloads **gemma4:e4b** (~4 GB) in the background automatically.
 
+---
+
+## AI Model — Gemma 4 e4b
+
+This project uses **`gemma4:e4b`** — the 4-billion-parameter efficient variant of Gemma 4.
+
+| Model | VRAM | Download | Speed |
+|-------|------|----------|-------|
+| **gemma4:e4b** ✅ | ~4 GB | ~4 GB | Fast |
+
+The model is pulled automatically by the `ollama-init` container on first startup.  
+**AI chat and building assessments will not work until the model finishes downloading.**
+
+To watch the download progress:
 ```bash
-git clone <your-repo-url> BhumiDrishti
-cd BhumiDrishti
-mkdir -p uploads data/osrm data/tiles_data docker/postgres/init
-echo "CREATE EXTENSION IF NOT EXISTS postgis;" > docker/postgres/init/01-postgis.sql
+docker compose logs -f ollama-init
 ```
 
-### 2. Download data
-
-Install `gdown` and download the data archive:
-
-```bash
-pip install gdown
-gdown 1vDWLi18YpW0o8s54FrV7mNO3XjBBpJ_K -O bhumidrishti_data.zip --fuzzy
-unzip bhumidrishti_data.zip -d .
-rm bhumidrishti_data.zip
-```
-
-### 3. Configure environment
-
-```bash
-# Backend
-cp backend/.env.example backend/.env
-
-# Frontend
-cp frontend/.env.local.example frontend/.env.local
-```
-
-Edit `backend/.env` if needed (defaults work with docker-compose out of the box).
-
-### 4. Build OSRM routing files (if not included in the data zip)
-
-```bash
-cd data/osrm
-
-# Download Turkey OSM data (~600 MB)
-curl -L https://download.geofabrik.de/europe/turkey-latest.osm.pbf -o turkey-latest.osm.pbf
-
-# Process (runs inside Docker — no local OSRM install needed)
-docker run --rm -v "$(pwd):/data" osrm/osrm-backend osrm-extract -p /opt/car.lua /data/turkey-latest.osm.pbf
-docker run --rm -v "$(pwd):/data" osrm/osrm-backend osrm-partition /data/turkey-latest.osrm
-docker run --rm -v "$(pwd):/data" osrm/osrm-backend osrm-customize /data/turkey-latest.osrm
-
-cd ../..
-```
-
-### 5. Launch
-
-```bash
-docker compose up --build -d
+To use a larger model (better quality, requires more VRAM), set `GEMMA_MODEL` in `backend/.env`:
+```env
+GEMMA_MODEL=gemma4:12b   # 8 GB VRAM
+GEMMA_MODEL=gemma4:26b   # 16 GB VRAM
 ```
 
 ---
 
 ## Accessing the System
 
-Once all containers are running (allow 2–5 minutes for first startup):
+Once all containers are up (allow 2–5 minutes after step 8):
 
 | Service | URL | Description |
 |---------|-----|-------------|
 | **Frontend** | http://localhost:3000 | Map, dashboard, AI chat |
 | **Backend API** | http://localhost:8000 | FastAPI REST endpoints |
 | **API Docs** | http://localhost:8000/docs | Interactive Swagger UI |
-| **TiTiler** | http://localhost:8080 | COG tile server |
-| **TileServer** | http://localhost:8081 | PMTiles base map |
+| **TiTiler** | http://localhost:8001 | COG tile server (drone/satellite imagery) |
+| **TileServer** | http://localhost:8090 | PMTiles base map |
 | **OSRM** | http://localhost:5000 | Routing engine |
-| **Ollama** | http://localhost:11434 | AI inference (internal) |
-
----
-
-## First Startup Notes
-
-- **Ollama will download Gemma 4 models automatically** (~4–20 GB depending on the model variant). This runs in the background after the containers start.
-- **AI features won't work** until the model download is complete.
-- Monitor model download progress:
-  ```bash
-  docker compose logs -f ollama-init
-  ```
-- The GIS loader will import building shapefiles into PostGIS on first start. Monitor with:
-  ```bash
-  docker compose logs -f gis-loader
-  ```
 
 ---
 
@@ -162,66 +125,59 @@ Once all containers are running (allow 2–5 minutes for first startup):
                            ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │                    Frontend (Next.js)                            │
-│  • Interactive map (MapLibre GL)                                 │
+│  • Interactive map (MapLibre GL + PMTiles)                       │
 │  • AI chat sidebar (SSE streaming)                               │
 │  • Batch orthophoto assessment UI                                │
 │  • Site & field team management                                  │
-└────────┬─────────────────────────┬───────────────────────────────┘
-         │ :8000                   │ :8080/:8081
-         ▼                         ▼
-┌─────────────────┐   ┌────────────────────┐   ┌──────────────────┐
-│  Backend API    │   │  TiTiler (COG)     │   │  TileServer GL   │
-│  (FastAPI)      │   │  Drone orthophoto  │   │  (PMTiles base   │
-│                 │   │  tile serving      │   │   map tiles)     │
-│  • /chat        │   └────────────────────┘   └──────────────────┘
-│  • /assessments │
-│  • /sites       │   ┌────────────────────────────────────────────┐
-│  • /uploads     │──▶│           Ollama (AI Engine)               │
-│  • /reports     │   │  Gemma 4 (e4b / 12b / 26b / 31b)          │
-│  • /field-teams │   │  • Building damage assessment              │
-│  • /routing     │   │  • AI chat with tool use                   │
-└────────┬────────┘   │  • Report generation                       │
-         │            └────────────────────────────────────────────┘
-         ▼
-┌─────────────────────────────────────────────────────────────────┐
-│               PostgreSQL + PostGIS                              │
-│  • Buildings (OpenStreetMap + damage assessments)               │
-│  • Sites, field teams, dispatch records                         │
-│  • Orthophoto upload metadata + bounds                          │
-│  • Batch processing progress                                    │
-└─────────────────────────────────────────────────────────────────┘
+└────────┬────────────────────────────┬─────────────────────────────┘
+         │ :8000                      │ :8001 / :8090
+         ▼                            ▼
+┌─────────────────┐   ┌─────────────────────┐  ┌──────────────────┐
+│  Backend API    │   │  TiTiler  (:8001)   │  │  TileServer GL   │
+│  (FastAPI)      │   │  COG tile serving   │  │  PMTiles base    │
+│                 │   │  (drone ortho +     │  │  map (:8090)     │
+│  /chat          │   │   satellite COGs)   │  └──────────────────┘
+│  /assessments   │   └─────────────────────┘
+│  /sites         │
+│  /uploads       │   ┌─────────────────────────────────────────────┐
+│  /reports       │──▶│           Ollama  (:11434)                  │
+│  /field-teams   │   │  gemma4:e4b  (~4 GB, auto-downloaded)       │
+│  /routing       │   │  • Building damage assessment (vision)      │
+└────────┬────────┘   │  • AI chat with tool use                    │
+         │            │  • Report generation                        │
+         ▼            └─────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│               PostgreSQL + PostGIS  (:5432)                     │
+│  • Buildings  • Sites  • Field teams  • Assessments             │
+│  • Orthophoto upload metadata        • Batch progress           │
+└──────────────────────────────────────────────────────────────────┘
          │
-         ▼
-┌─────────────────┐   ┌──────────────────────────────────────────┐
-│  OSRM           │   │  GIS Loader (one-shot init container)    │
-│  (Routing)      │   │  Imports shapefiles → PostGIS on startup │
-│  Turkey road    │   └──────────────────────────────────────────┘
-│  network :5000  │
-└─────────────────┘
+         ├── OSRM (:5000)          Turkey road network routing
+         └── GIS Loader            Imports shapefiles → PostGIS (one-time)
 ```
 
-### Data flow — Batch Orthophoto Assessment
+### Batch Orthophoto Assessment — Data Flow
 
 ```
-Upload COG (drone orthophoto)
+Upload drone COG (orthophoto)
          │
          ▼
 find_covering_upload()
   Pass 1: check DB bounds columns
-  Pass 2: read COG from disk (rasterio), backfill DB
+  Pass 2: read COG via rasterio, backfill DB bounds
          │
          ▼
-For each building in site:
-  chip_extractor.py → extract building chip from COG
+For each building in the site:
+  chip_extractor → crop building chip from COG
          │
          ▼
-Gemma 4 Vision → analyse chip (pre + post images)
+Gemma 4 e4b Vision → analyse pre + post image chips
          │
          ▼
-JSON assessment → stored in PostgreSQL
+Structured JSON assessment → stored in PostgreSQL
          │
          ▼
-SSE events → live progress in frontend
+SSE events → live progress updates in frontend
 ```
 
 ---
@@ -230,6 +186,8 @@ SSE events → live progress in frontend
 
 ### Backend (`backend/.env`)
 
+> Auto-created from `backend/.env.example` by the setup script.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OLLAMA_HOST` | `http://ollama:11434` | Ollama API endpoint |
@@ -237,20 +195,13 @@ SSE events → live progress in frontend
 | `DB_NAME` | `bhumidrishti` | Database name |
 | `DB_USER` | `bhumidrishti` | Database user |
 | `DB_PASSWORD` | `bhumidrishti` | Database password |
-| `GEMMA_MODEL` | `gemma4:e4b` | AI model variant |
-| `MAX_VIDEO_SIZE_MB` | `500` | Max drone video size |
+| `GEMMA_MODEL` | `gemma4:e4b` | AI model — change to pull a different variant |
+| `MAX_VIDEO_SIZE_MB` | `500` | Max drone video upload size |
 | `MAX_FRAMES_TO_ANALYZE` | `5` | Frames sampled per video |
 
-#### Model variants
-
-| Value | Size | VRAM | Speed |
-|-------|------|------|-------|
-| `gemma4:e4b` | 4B | ~3–4 GB | Fastest (recommended for demos) |
-| `gemma4:12b` | 12B | ~8 GB | Balanced |
-| `gemma4:26b` | 26B | ~16 GB | High quality |
-| `gemma4:31b` | 31B | ~20 GB | Highest quality |
-
 ### Frontend (`frontend/.env.local`)
+
+> Auto-created from `frontend/.env.local.example` by the setup script.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -267,65 +218,66 @@ docker compose up -d
 # Stop all services
 docker compose down
 
-# Rebuild and restart
+# Rebuild and restart (after code changes)
 docker compose up --build -d
 
 # View all logs
 docker compose logs -f
 
-# View specific service logs
-docker compose logs -f backend
+# Watch model download
 docker compose logs -f ollama-init
+
+# Watch GIS data import
 docker compose logs -f gis-loader
+
+# View backend logs
+docker compose logs -f backend
 
 # Restart a single service
 docker compose restart backend
 
+# Check which Ollama models are downloaded
+docker compose exec ollama ollama list
+
 # Open a shell in the backend container
 docker compose exec backend bash
-
-# Check database tables
-docker compose exec postgres psql -U bhumidrishti -d bhumidrishti -c "\dt"
-
-# Check Ollama models
-docker compose exec ollama ollama list
 ```
 
 ---
 
 ## Troubleshooting
 
+### "AI chat not working" / model not responding
+
+The model is still downloading. Check progress:
+```bash
+docker compose logs -f ollama-init
+```
+Wait for: `Model ready: gemma4:e4b`
+
 ### GIS loader fails to import shapefiles
 
 ```bash
 docker compose logs gis-loader
 ```
+Verify `data/turkey_data/*/buildings/buildings.shp` exists. Re-run setup if data is missing.
 
-Common causes:
-- Shapefile not found — verify `data/turkey_data/*/buildings/buildings.shp` exists
-- PostGIS extension not installed — check `docker/postgres/init/01-postgis.sql` exists
-
-### Ollama model download stuck or failed
+### Ollama model download interrupted
 
 ```bash
-docker compose logs -f ollama-init
 docker compose restart ollama-init
 ```
-
-If the model is partially downloaded, it will resume from where it left off.
+The download will resume from where it stopped.
 
 ### Backend cannot connect to database
 
 ```bash
-docker compose logs backend | grep "DB\|postgres\|asyncpg"
+docker compose ps          # check postgres is healthy
+docker compose logs backend | grep -i "db\|postgres"
 ```
-
-- Ensure the `postgres` container is healthy: `docker compose ps`
-- Wait 30 seconds after `postgres` starts before `backend` connects
+Wait 30 seconds after postgres starts before the backend connects.
 
 ### Port already in use
-
-If a port (3000, 8000, 8080, etc.) is already in use:
 
 ```bash
 # Linux / macOS
@@ -334,13 +286,11 @@ lsof -i :3000
 # Windows
 netstat -ano | findstr :3000
 ```
-
-Edit `docker-compose.yml` to change the host port mapping.
+Edit `docker-compose.yml` to change the host-side port number.
 
 ### OSRM routing returns no routes
 
-The OSRM pre-processed files may be missing or corrupt. Rebuild:
-
+Rebuild OSRM files:
 ```bash
 cd data/osrm
 docker run --rm -v "$(pwd):/data" osrm/osrm-backend osrm-extract -p /opt/car.lua /data/turkey-latest.osm.pbf
@@ -351,38 +301,26 @@ docker run --rm -v "$(pwd):/data" osrm/osrm-backend osrm-customize /data/turkey-
 ### Windows: "Access denied" when extracting zip
 
 Run PowerShell as Administrator, or use 7-Zip:
-
 ```powershell
 & "C:\Program Files\7-Zip\7z.exe" x bhumidrishti_data.zip -o"C:\Bhumidrishti" -y
 ```
 
 ### gdown fails with quota error
 
-The Google Drive file may have hit a download quota. Try:
-
 ```bash
-# Add --no-cookies flag
+# Try with no-cookies flag
 gdown 1vDWLi18YpW0o8s54FrV7mNO3XjBBpJ_K --fuzzy --no-cookies
-
-# Or use wget with the direct URL
-wget "https://drive.google.com/uc?export=download&id=1vDWLi18YpW0o8s54FrV7mNO3XjBBpJ_K" -O bhumidrishti_data.zip
 ```
-
-### AI chat returns no response or times out
-
-- Check Ollama is running: `docker compose ps ollama`
-- Check the model is loaded: `docker compose exec ollama ollama list`
-- The `gemma4:e4b` model is recommended for faster responses on limited hardware
 
 ---
 
 ## Stopping & Restarting
 
 ```bash
-# Stop (preserves all data)
+# Stop all services (data is preserved)
 docker compose down
 
-# Stop and remove all data volumes (DESTRUCTIVE — deletes database)
+# Stop and wipe the database (DESTRUCTIVE)
 docker compose down -v
 
 # Restart after stopping
@@ -395,17 +333,21 @@ docker compose up -d
 
 ```
 BhumiDrishti/
-├── frontend/          # Next.js web app
-├── backend/           # FastAPI API + AI pipeline
+├── frontend/               # Next.js web app (map, chat, dashboard)
+├── backend/                # FastAPI API + AI pipeline
+│   ├── .env.example        # Backend config template
+│   ├── routers/            # API route handlers
+│   ├── services/           # AI pipeline, tools, orthophoto processing
+│   └── models/             # Pydantic data models
 ├── data/
-│   ├── turkey_data/   # Satellite COGs, DEMs, shapefiles
-│   ├── osrm/          # OSRM routing files
-│   └── tiles_data/    # PMTiles base map + config
-├── docker/            # Docker init scripts
-├── uploads/           # User-uploaded orthophotos
-├── docker-compose.yml
-├── setup.sh           # Linux/macOS one-command setup
-└── setup.ps1          # Windows one-command setup
+│   ├── turkey_data/        # Satellite COGs, DEMs, building shapefiles
+│   ├── osrm/               # OSRM routing files (Turkey road network)
+│   └── tiles_data/         # PMTiles base map + TileServer config
+├── docker/                 # Docker init scripts
+├── uploads/                # User-uploaded drone orthophotos
+├── docker-compose.yml      # Full service stack
+├── setup.sh                # Linux/macOS one-command setup
+└── setup.ps1               # Windows one-command setup
 ```
 
 ---

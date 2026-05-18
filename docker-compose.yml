@@ -37,6 +37,7 @@ services:
     container_name: ollama-init
     environment:
       - OLLAMA_HOST=http://ollama:11434
+      - GEMMA_MODEL=${GEMMA_MODEL:-gemma4:e4b}
     depends_on:
       - ollama
     entrypoint: >
@@ -44,19 +45,15 @@ services:
       set -e;
       echo "Waiting for Ollama to be ready...";
       until ollama list > /dev/null 2>&1; do sleep 3; done;
-      ensure_model() {
-        model_name=$$1;
-        if ollama show $$model_name > /dev/null 2>&1; then
-          echo "Model already present, skipping: $$model_name";
-        else
-          echo "Pulling missing model: $$model_name";
-          ollama pull $$model_name;
-        fi
-      };
-      ensure_model gemma4:26b;
-      ensure_model gemma4:31b;
-      ensure_model gemma4:e4b;
-      echo "Model check complete.";
+      MODEL=$${GEMMA_MODEL:-gemma4:e4b};
+      echo "Checking model: $$MODEL";
+      if ollama show $$MODEL > /dev/null 2>&1; then
+        echo "Model already present, skipping: $$MODEL";
+      else
+        echo "Pulling model $$MODEL — this may take 10-20 min on first run...";
+        ollama pull $$MODEL;
+      fi;
+      echo "Model ready: $$MODEL";
       '
 
   titiler:

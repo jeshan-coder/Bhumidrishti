@@ -1,7 +1,18 @@
 # =============================================================================
 #  BhumiDrishti — One-Command Setup Script (Windows PowerShell)
 #  Offline AI Disaster Assessment Platform
-#  Run as:  powershell -ExecutionPolicy Bypass -File setup.ps1
+#
+#  Usage:  powershell -ExecutionPolicy Bypass -File setup.ps1
+#
+#  What this script does (fully automated, no manual steps):
+#    1. Check Docker + Docker Compose
+#    2. Detect NVIDIA GPU / Container Toolkit
+#    3. Create .env files from examples
+#    4. Download ~10 GB data from Google Drive
+#    5. Create required directories
+#    6. Verify critical data files
+#    7. Check / build OSRM routing files
+#    8. Launch all services with docker compose up --build -d
 # =============================================================================
 
 $ErrorActionPreference = "Stop"
@@ -9,17 +20,18 @@ $ErrorActionPreference = "Stop"
 $GDRIVE_FILE_ID = "1vDWLi18YpW0o8s54FrV7mNO3XjBBpJ_K"
 $DATA_ZIP       = "bhumidrishti_data.zip"
 $REPO_ROOT      = Split-Path -Parent $MyInvocation.MyCommand.Path
-$TOTAL_STEPS    = 7
+$TOTAL_STEPS    = 8
 
 function Write-Step($n, $msg) { Write-Host "`n[$n/$TOTAL_STEPS] $msg" -ForegroundColor Yellow }
-function Write-Ok($msg)   { Write-Host "  ✓ $msg" -ForegroundColor Green }
-function Write-Warn($msg) { Write-Host "  ⚠ $msg" -ForegroundColor Yellow }
-function Write-Fail($msg) { Write-Host "  ✗ $msg" -ForegroundColor Red }
+function Write-Ok($msg)   { Write-Host "  v $msg" -ForegroundColor Green }
+function Write-Warn($msg) { Write-Host "  ! $msg" -ForegroundColor Yellow }
+function Write-Fail($msg) { Write-Host "  X $msg" -ForegroundColor Red }
 
 Write-Host ""
 Write-Host "  ██████╗ ██╗  ██╗██╗   ██╗███╗   ███╗██╗██████╗ ██████╗ ██╗███████╗██╗  ██╗████████╗██╗" -ForegroundColor Blue
 Write-Host "  ██╔══██╗██║  ██║██║   ██║████╗ ████║██║██╔══██╗██╔══██╗██║██╔════╝██║  ██║╚══██╔══╝██║" -ForegroundColor Blue
 Write-Host "  Offline AI Disaster Assessment Platform — Windows Setup" -ForegroundColor Cyan
+Write-Host "  AI Model: gemma4:e4b  (~4 GB download on first run)" -ForegroundColor Yellow
 Write-Host ""
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -44,7 +56,6 @@ try {
 $dockerVer = (docker --version) -replace ".*version ([0-9.]+).*",'$1'
 Write-Ok "Docker $dockerVer"
 
-# Prefer compose v2 plugin
 $ComposeCmd = $null
 if (docker compose version 2>$null) {
     $ComposeCmd = "docker compose"
@@ -79,12 +90,36 @@ if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
     }
 } else {
     Write-Warn "No NVIDIA GPU detected. AI will run on CPU (very slow)."
+    Write-Warn "Recommended: NVIDIA GPU with 6+ GB VRAM for gemma4:e4b."
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 3 — Download data from Google Drive
+# STEP 3 — Create .env files
 # ─────────────────────────────────────────────────────────────────────────────
-Write-Step 3 "Downloading data (~10 GB from Google Drive)..."
+Write-Step 3 "Creating environment files..."
+
+$backendEnv = "$REPO_ROOT\backend\.env"
+$backendEnvExample = "$REPO_ROOT\backend\.env.example"
+if (-not (Test-Path $backendEnv)) {
+    Copy-Item $backendEnvExample $backendEnv
+    Write-Ok "Created backend/.env from example"
+} else {
+    Write-Ok "backend/.env already exists — skipping"
+}
+
+$frontendEnv = "$REPO_ROOT\frontend\.env.local"
+$frontendEnvExample = "$REPO_ROOT\frontend\.env.local.example"
+if (-not (Test-Path $frontendEnv)) {
+    Copy-Item $frontendEnvExample $frontendEnv
+    Write-Ok "Created frontend/.env.local from example"
+} else {
+    Write-Ok "frontend/.env.local already exists — skipping"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 4 — Download data from Google Drive
+# ─────────────────────────────────────────────────────────────────────────────
+Write-Step 4 "Downloading data (~10 GB from Google Drive)..."
 
 $DataPopulated = (Test-Path "$REPO_ROOT\data\turkey_data\Adiyaman") -and
                  (Test-Path "$REPO_ROOT\data\turkey_data\Hatay") -and
@@ -94,7 +129,6 @@ $DataPopulated = (Test-Path "$REPO_ROOT\data\turkey_data\Adiyaman") -and
 if ($DataPopulated) {
     Write-Ok "Data directory already populated — skipping download."
 } else {
-    # Check gdown
     if (-not (Get-Command gdown -ErrorAction SilentlyContinue)) {
         Write-Host "  Installing gdown..."
         if (Get-Command pip3 -ErrorAction SilentlyContinue) {
@@ -113,17 +147,9 @@ if ($DataPopulated) {
     gdown $GDRIVE_FILE_ID -O $DATA_ZIP --fuzzy
 
     Write-Host "  Extracting archive..."
-    # Detect top-level structure
-    $entries = (& 7z l $DATA_ZIP 2>$null | Select-String "data/")
-    if ($entries -or (Test-Path "C:\Program Files\7-Zip\7z.exe")) {
-        # Try 7-Zip first (faster)
-        if (Test-Path "C:\Program Files\7-Zip\7z.exe") {
-            & "C:\Program Files\7-Zip\7z.exe" x $DATA_ZIP -o"$REPO_ROOT" -y | Out-Null
-        } else {
-            Expand-Archive -Path $DATA_ZIP -DestinationPath $REPO_ROOT -Force
-        }
+    if (Test-Path "C:\Program Files\7-Zip\7z.exe") {
+        & "C:\Program Files\7-Zip\7z.exe" x $DATA_ZIP -o"$REPO_ROOT" -y | Out-Null
     } else {
-        # PowerShell built-in
         Expand-Archive -Path $DATA_ZIP -DestinationPath $REPO_ROOT -Force
     }
 
@@ -132,9 +158,9 @@ if ($DataPopulated) {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 4 — Create directories
+# STEP 5 — Create directories
 # ─────────────────────────────────────────────────────────────────────────────
-Write-Step 4 "Creating required directories..."
+Write-Step 5 "Creating required directories..."
 
 @(
     "$REPO_ROOT\uploads",
@@ -151,9 +177,9 @@ if (-not (Test-Path $pgInit)) {
 Write-Ok "Directories ready."
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 5 — Verify critical files
+# STEP 6 — Verify critical files
 # ─────────────────────────────────────────────────────────────────────────────
-Write-Step 5 "Verifying critical data files..."
+Write-Step 6 "Verifying critical data files..."
 
 $criticalFiles = @{
     "Adiyaman pre-earthquake COG"  = "$REPO_ROOT\data\turkey_data\Adiyaman\pre_earthquake_adiyaman_cog.tif"
@@ -184,9 +210,9 @@ if ($missing -gt 0) {
 Write-Ok "All critical files verified."
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 6 — OSRM
+# STEP 7 — OSRM
 # ─────────────────────────────────────────────────────────────────────────────
-Write-Step 6 "Checking OSRM routing files..."
+Write-Step 7 "Checking OSRM routing files..."
 
 $osrmOk = (Test-Path "$REPO_ROOT\data\osrm\turkey-latest.osrm") -and
           (Test-Path "$REPO_ROOT\data\osrm\turkey-latest.osrm.partition") -and
@@ -222,9 +248,9 @@ if ($osrmOk) {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 7 — Launch
+# STEP 8 — Launch
 # ─────────────────────────────────────────────────────────────────────────────
-Write-Step 7 "Starting BhumiDrishti..."
+Write-Step 8 "Starting BhumiDrishti..."
 
 Set-Location $REPO_ROOT
 if ($ComposeCmd -eq "docker compose") {
@@ -235,7 +261,7 @@ if ($ComposeCmd -eq "docker compose") {
 
 Write-Host ""
 Write-Host "╔══════════════════════════════════════════════════════╗" -ForegroundColor Green
-Write-Host "║              Setup Complete!  🎉                     ║" -ForegroundColor Green
+Write-Host "║              Setup Complete!                         ║" -ForegroundColor Green
 Write-Host "╚══════════════════════════════════════════════════════╝" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Service URLs:" -ForegroundColor Cyan
@@ -244,7 +270,8 @@ Write-Host "    Backend:    http://localhost:8000" -ForegroundColor Blue
 Write-Host "    API Docs:   http://localhost:8000/docs" -ForegroundColor Blue
 Write-Host ""
 Write-Host "  First-start notes:" -ForegroundColor Yellow
-Write-Host "    Ollama downloads Gemma 4 models in the background (~4-20 GB)."
+Write-Host "    Ollama will download gemma4:e4b (~4 GB) in the background."
+Write-Host "    AI chat won't work until the model download is complete."
 Write-Host "    Watch: docker compose logs -f ollama-init"
 Write-Host ""
 Write-Host "  Stop:    docker compose down" -ForegroundColor Yellow
