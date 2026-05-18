@@ -189,7 +189,13 @@ if [ "$DATA_ALREADY_PRESENT" = false ]; then
   if ! $PYTHON_CMD -m pip --version &>/dev/null 2>&1; then
     warn "pip not found. Installing pip..."
     if command -v apt-get &>/dev/null; then
-      sudo apt-get install -y -qq python3-pip
+      echo "  Running apt-get update first..."
+      sudo apt-get update -qq
+      sudo apt-get install -y -qq python3-pip python3-venv || {
+        # apt failed (e.g. 404) — fall back to get-pip.py
+        warn "apt install failed, falling back to get-pip.py..."
+        curl -sSL https://bootstrap.pypa.io/get-pip.py | $PYTHON_CMD
+      }
     elif command -v dnf &>/dev/null; then
       sudo dnf install -y python3-pip
     elif command -v yum &>/dev/null; then
