@@ -149,6 +149,7 @@ services:
       - ./frontend:/app
       - /app/node_modules
       - /app/.next
+      - ./data/tiles_data:/data/tiles_data
     environment:
       - NEXT_PUBLIC_API_URL=http://localhost:8000
       - BACKEND_INTERNAL_URL=http://backend:8000
