@@ -1,5 +1,5 @@
 # =============================================================================
-#  BhumiDrishti — One-Command Setup Script (Windows PowerShell)
+#  BhumiDrishti - One-Command Setup Script (Windows PowerShell)
 #  Offline AI Disaster Assessment Platform
 #
 #  Usage:  powershell -ExecutionPolicy Bypass -File setup.ps1
@@ -23,20 +23,19 @@ $REPO_ROOT      = Split-Path -Parent $MyInvocation.MyCommand.Path
 $TOTAL_STEPS    = 8
 
 function Write-Step($n, $msg) { Write-Host "`n[$n/$TOTAL_STEPS] $msg" -ForegroundColor Yellow }
-function Write-Ok($msg)   { Write-Host "  v $msg" -ForegroundColor Green }
-function Write-Warn($msg) { Write-Host "  ! $msg" -ForegroundColor Yellow }
-function Write-Fail($msg) { Write-Host "  X $msg" -ForegroundColor Red }
+function Write-Ok($msg)   { Write-Host "  OK  $msg" -ForegroundColor Green }
+function Write-Warn($msg) { Write-Host "  !!  $msg" -ForegroundColor Yellow }
+function Write-Fail($msg) { Write-Host "  XX  $msg" -ForegroundColor Red }
 
 Write-Host ""
-Write-Host "  ██████╗ ██╗  ██╗██╗   ██╗███╗   ███╗██╗██████╗ ██████╗ ██╗███████╗██╗  ██╗████████╗██╗" -ForegroundColor Blue
-Write-Host "  ██╔══██╗██║  ██║██║   ██║████╗ ████║██║██╔══██╗██╔══██╗██║██╔════╝██║  ██║╚══██╔══╝██║" -ForegroundColor Blue
-Write-Host "  Offline AI Disaster Assessment Platform — Windows Setup" -ForegroundColor Cyan
+Write-Host "  BHUMIDRISHTI" -ForegroundColor Blue
+Write-Host "  Offline AI Disaster Assessment Platform - Windows Setup" -ForegroundColor Cyan
 Write-Host "  AI Model: gemma4:e4b  (~4 GB download on first run)" -ForegroundColor Yellow
 Write-Host ""
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STEP 1 — Docker
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# STEP 1 - Docker
+# -----------------------------------------------------------------------------
 Write-Step 1 "Checking Docker..."
 
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
@@ -68,9 +67,9 @@ if (docker compose version 2>$null) {
     exit 1
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STEP 2 — NVIDIA GPU
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# STEP 2 - NVIDIA GPU
+# -----------------------------------------------------------------------------
 Write-Step 2 "Checking NVIDIA GPU support..."
 
 $GpuAvailable = $false
@@ -93,9 +92,9 @@ if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
     Write-Warn "Recommended: NVIDIA GPU with 6+ GB VRAM for gemma4:e4b."
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STEP 3 — Create .env files
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# STEP 3 - Create .env files
+# -----------------------------------------------------------------------------
 Write-Step 3 "Creating environment files..."
 
 $backendEnv = "$REPO_ROOT\backend\.env"
@@ -104,7 +103,7 @@ if (-not (Test-Path $backendEnv)) {
     Copy-Item $backendEnvExample $backendEnv
     Write-Ok "Created backend/.env from example"
 } else {
-    Write-Ok "backend/.env already exists — skipping"
+    Write-Ok "backend/.env already exists - skipping"
 }
 
 $frontendEnv = "$REPO_ROOT\frontend\.env.local"
@@ -113,12 +112,12 @@ if (-not (Test-Path $frontendEnv)) {
     Copy-Item $frontendEnvExample $frontendEnv
     Write-Ok "Created frontend/.env.local from example"
 } else {
-    Write-Ok "frontend/.env.local already exists — skipping"
+    Write-Ok "frontend/.env.local already exists - skipping"
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STEP 4 — Download data from Google Drive
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# STEP 4 - Download data from Google Drive
+# -----------------------------------------------------------------------------
 Write-Step 4 "Downloading data (~10 GB from Google Drive)..."
 
 $DataPopulated = (Test-Path "$REPO_ROOT\data\turkey_data\Adiyaman") -and
@@ -127,7 +126,7 @@ $DataPopulated = (Test-Path "$REPO_ROOT\data\turkey_data\Adiyaman") -and
                  (Test-Path "$REPO_ROOT\data\tiles_data")
 
 if ($DataPopulated) {
-    Write-Ok "Data directory already populated — skipping download."
+    Write-Ok "Data directory already populated - skipping download."
 } else {
     if (-not (Get-Command gdown -ErrorAction SilentlyContinue)) {
         Write-Host "  Installing gdown..."
@@ -142,7 +141,7 @@ if ($DataPopulated) {
     }
     Write-Ok "gdown ready"
 
-    Write-Host "  Downloading data zip (10–30 min)..."
+    Write-Host "  Downloading data zip (10-30 min)..."
     Set-Location $REPO_ROOT
     gdown $GDRIVE_FILE_ID -O $DATA_ZIP --fuzzy
 
@@ -157,9 +156,9 @@ if ($DataPopulated) {
     Write-Ok "Data extracted."
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STEP 5 — Create directories
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# STEP 5 - Create directories
+# -----------------------------------------------------------------------------
 Write-Step 5 "Creating required directories..."
 
 @(
@@ -176,9 +175,9 @@ if (-not (Test-Path $pgInit)) {
 
 Write-Ok "Directories ready."
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STEP 6 — Verify critical files
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# STEP 6 - Verify critical files
+# -----------------------------------------------------------------------------
 Write-Step 6 "Verifying critical data files..."
 
 $criticalFiles = @{
@@ -209,9 +208,9 @@ if ($missing -gt 0) {
 }
 Write-Ok "All critical files verified."
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STEP 7 — OSRM
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# STEP 7 - OSRM
+# -----------------------------------------------------------------------------
 Write-Step 7 "Checking OSRM routing files..."
 
 $osrmOk = (Test-Path "$REPO_ROOT\data\osrm\turkey-latest.osrm") -and
@@ -247,9 +246,9 @@ if ($osrmOk) {
     Write-Ok "OSRM routing files built."
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# STEP 8 — Launch
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# STEP 8 - Launch
+# -----------------------------------------------------------------------------
 Write-Step 8 "Starting BhumiDrishti..."
 
 Set-Location $REPO_ROOT
@@ -260,9 +259,9 @@ if ($ComposeCmd -eq "docker compose") {
 }
 
 Write-Host ""
-Write-Host "╔══════════════════════════════════════════════════════╗" -ForegroundColor Green
-Write-Host "║              Setup Complete!                         ║" -ForegroundColor Green
-Write-Host "╚══════════════════════════════════════════════════════╝" -ForegroundColor Green
+Write-Host "============================================================" -ForegroundColor Green
+Write-Host "  Setup Complete!" -ForegroundColor Green
+Write-Host "============================================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Service URLs:" -ForegroundColor Cyan
 Write-Host "    Frontend:   http://localhost:3000" -ForegroundColor Blue
@@ -271,7 +270,7 @@ Write-Host "    API Docs:   http://localhost:8000/docs" -ForegroundColor Blue
 Write-Host ""
 Write-Host "  First-start notes:" -ForegroundColor Yellow
 Write-Host "    Ollama will download gemma4:e4b (~4 GB) in the background."
-Write-Host "    AI chat won't work until the model download is complete."
+Write-Host "    AI chat will not work until the model download is complete."
 Write-Host "    Watch: docker compose logs -f ollama-init"
 Write-Host ""
 Write-Host "  Stop:    docker compose down" -ForegroundColor Yellow
