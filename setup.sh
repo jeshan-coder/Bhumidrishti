@@ -122,117 +122,129 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 4 — Download data from Google Drive
+# STEP 4 — Download / extract data
+# Logic:
+#   1. All extracted folders present  → skip everything
+#   2. Zip file already on disk       → skip download, extract from local zip
+#   3. Neither                        → download zip, then extract
+# The zip is KEPT after extraction so re-runs never re-download.
 # ─────────────────────────────────────────────────────────────────────────────
-step 4 "Downloading data (~10 GB from Google Drive)..."
+step 4 "Setting up data (~10 GB)..."
 
-DATA_ALREADY_PRESENT=false
+DATA_EXTRACTED=false
 if [ -d "${REPO_ROOT}/data/turkey_data/Adiyaman" ] && \
    [ -d "${REPO_ROOT}/data/turkey_data/Hatay" ] && \
    [ -d "${REPO_ROOT}/data/osrm" ] && \
    [ -d "${REPO_ROOT}/data/tiles_data" ]; then
-  ok "Data directory already populated — skipping download."
-  DATA_ALREADY_PRESENT=true
+  ok "Data already extracted — skipping download and extraction."
+  DATA_EXTRACTED=true
 fi
 
-if [ "$DATA_ALREADY_PRESENT" = false ]; then
-  # ── Ensure Python is available ────────────────────────────────────────────
-  PYTHON_CMD=""
-  if command -v python3 &>/dev/null; then
-    PYTHON_CMD="python3"
-  elif command -v python &>/dev/null; then
-    PYTHON_CMD="python"
-  fi
+if [ "$DATA_EXTRACTED" = false ]; then
 
-  if [ -z "$PYTHON_CMD" ]; then
-    warn "Python not found. Installing Python 3 automatically..."
-
+  # ── Ensure unzip is available ─────────────────────────────────────────────
+  if ! command -v unzip &>/dev/null; then
+    warn "unzip not found. Installing..."
     if command -v apt-get &>/dev/null; then
-      # Debian / Ubuntu
-      sudo apt-get update -qq && sudo apt-get install -y -qq python3 python3-pip
+      sudo apt-get update -qq && sudo apt-get install -y -qq unzip
     elif command -v dnf &>/dev/null; then
-      # Fedora / RHEL / Rocky
-      sudo dnf install -y python3 python3-pip
+      sudo dnf install -y unzip
     elif command -v yum &>/dev/null; then
-      # CentOS / older RHEL
-      sudo yum install -y python3 python3-pip
+      sudo yum install -y unzip
     elif command -v pacman &>/dev/null; then
-      # Arch
-      sudo pacman -Sy --noconfirm python python-pip
+      sudo pacman -Sy --noconfirm unzip
     elif command -v brew &>/dev/null; then
-      # macOS Homebrew
-      brew install python3
+      brew install unzip
     else
-      fail "Cannot auto-install Python: no known package manager found."
-      echo "  Please install Python 3 manually: https://www.python.org/downloads/"
-      echo "  Then re-run this script."
+      fail "Cannot install unzip automatically. Please install it manually and re-run."
       exit 1
     fi
+  fi
+  ok "unzip ready"
 
-    # Re-check
+  # ── Decide: download or reuse local zip ──────────────────────────────────
+  ZIP_PATH="${REPO_ROOT}/${DATA_ZIP}"
+
+  if [ -f "${ZIP_PATH}" ]; then
+    ok "Found local zip: ${DATA_ZIP} — skipping download, extracting directly."
+  else
+    # ── Ensure Python is available ──────────────────────────────────────────
+    PYTHON_CMD=""
     if command -v python3 &>/dev/null; then
       PYTHON_CMD="python3"
-      ok "Python installed: $(python3 --version)"
     elif command -v python &>/dev/null; then
       PYTHON_CMD="python"
-      ok "Python installed: $(python --version)"
-    else
-      fail "Python installation failed."
-      echo "  Please install Python 3 manually: https://www.python.org/downloads/"
-      exit 1
     fi
-  else
+
+    if [ -z "$PYTHON_CMD" ]; then
+      warn "Python not found. Installing Python 3 automatically..."
+      if command -v apt-get &>/dev/null; then
+        sudo apt-get update -qq && sudo apt-get install -y -qq python3 python3-pip
+      elif command -v dnf &>/dev/null; then
+        sudo dnf install -y python3 python3-pip
+      elif command -v yum &>/dev/null; then
+        sudo yum install -y python3 python3-pip
+      elif command -v pacman &>/dev/null; then
+        sudo pacman -Sy --noconfirm python python-pip
+      elif command -v brew &>/dev/null; then
+        brew install python3
+      else
+        fail "Cannot auto-install Python. Please install it manually and re-run."
+        exit 1
+      fi
+      if command -v python3 &>/dev/null; then PYTHON_CMD="python3"
+      elif command -v python &>/dev/null; then PYTHON_CMD="python"
+      else fail "Python installation failed."; exit 1
+      fi
+    fi
     ok "Python found: $($PYTHON_CMD --version)"
-  fi
 
-  # ── Ensure pip is available ───────────────────────────────────────────────
-  if ! $PYTHON_CMD -m pip --version &>/dev/null 2>&1; then
-    warn "pip not found. Installing pip..."
-    if command -v apt-get &>/dev/null; then
-      echo "  Running apt-get update first..."
-      sudo apt-get update -qq
-      sudo apt-get install -y -qq python3-pip python3-venv || {
-        # apt failed (e.g. 404) — fall back to get-pip.py
-        warn "apt install failed, falling back to get-pip.py..."
-        curl -sSL https://bootstrap.pypa.io/get-pip.py | $PYTHON_CMD
-      }
-    elif command -v dnf &>/dev/null; then
-      sudo dnf install -y python3-pip
-    elif command -v yum &>/dev/null; then
-      sudo yum install -y python3-pip
-    elif command -v pacman &>/dev/null; then
-      sudo pacman -Sy --noconfirm python-pip
-    else
-      # Universal fallback via ensurepip / get-pip.py
-      $PYTHON_CMD -m ensurepip --upgrade 2>/dev/null || \
-        curl -sSL https://bootstrap.pypa.io/get-pip.py | $PYTHON_CMD
+    # ── Ensure pip is available ─────────────────────────────────────────────
+    if ! $PYTHON_CMD -m pip --version &>/dev/null 2>&1; then
+      warn "pip not found. Installing pip..."
+      if command -v apt-get &>/dev/null; then
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq python3-pip python3-venv || \
+          curl -sSL https://bootstrap.pypa.io/get-pip.py | $PYTHON_CMD
+      elif command -v dnf &>/dev/null; then
+        sudo dnf install -y python3-pip
+      elif command -v yum &>/dev/null; then
+        sudo yum install -y python3-pip
+      elif command -v pacman &>/dev/null; then
+        sudo pacman -Sy --noconfirm python-pip
+      else
+        $PYTHON_CMD -m ensurepip --upgrade 2>/dev/null || \
+          curl -sSL https://bootstrap.pypa.io/get-pip.py | $PYTHON_CMD
+      fi
     fi
+
+    # ── Ensure gdown is available ───────────────────────────────────────────
+    echo "  Installing gdown..."
+    $PYTHON_CMD -m pip install --quiet --user gdown 2>/dev/null || \
+      $PYTHON_CMD -m pip install --quiet --user --break-system-packages gdown
+    export PATH="$HOME/.local/bin:$PATH"
+    ok "gdown ready"
+
+    echo "  Downloading data zip (10-30 min)..."
+    $PYTHON_CMD -m gdown "${GDRIVE_FILE_ID}" -O "${ZIP_PATH}"
+    ok "Download complete: ${DATA_ZIP}"
   fi
 
-  # ── Ensure gdown is available (use python -m gdown to avoid PATH issues) ──
-  echo "  Installing gdown (Google Drive downloader)..."
-  # Ubuntu 24.04+ (PEP 668) blocks pip install without --break-system-packages
-  $PYTHON_CMD -m pip install --quiet --user gdown 2>/dev/null || \
-    $PYTHON_CMD -m pip install --quiet --user --break-system-packages gdown
-  export PATH="$HOME/.local/bin:$PATH"
-  ok "gdown ready"
-
-  echo "  Downloading data zip (this may take 10-30 min depending on connection speed)..."
-  $PYTHON_CMD -m gdown "${GDRIVE_FILE_ID}" -O "${REPO_ROOT}/${DATA_ZIP}"
-
-  echo "  Extracting archive..."
+  # ── Extract ───────────────────────────────────────────────────────────────
+  echo "  Extracting archive (this may take a few minutes)..."
   cd "${REPO_ROOT}"
 
-  FIRST_ENTRY=$(unzip -Z1 "${DATA_ZIP}" | head -1)
+  # Detect whether zip has a top-level data/ folder or not
+  FIRST_ENTRY=$(unzip -Z1 "${ZIP_PATH}" 2>/dev/null | head -1)
   if [[ "$FIRST_ENTRY" == data/* ]]; then
-    unzip -q "${DATA_ZIP}" -d "${REPO_ROOT}"
+    unzip -q -o "${ZIP_PATH}" -d "${REPO_ROOT}"
   else
     mkdir -p "${REPO_ROOT}/data"
-    unzip -q "${DATA_ZIP}" -d "${REPO_ROOT}/data"
+    unzip -q -o "${ZIP_PATH}" -d "${REPO_ROOT}/data"
   fi
 
-  rm -f "${DATA_ZIP}"
-  ok "Data extracted successfully."
+  # Keep the zip — do NOT delete it so re-runs can reuse it
+  ok "Data extracted. Zip kept at: ${DATA_ZIP}"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
