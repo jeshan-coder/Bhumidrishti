@@ -206,6 +206,77 @@ async def _run_startup_migrations() -> None:
         "CREATE INDEX IF NOT EXISTS idx_reports_type ON reports(report_type)",
         "CREATE INDEX IF NOT EXISTS idx_reports_site_id ON reports(site_id)",
         "CREATE INDEX IF NOT EXISTS idx_reports_assessment_id ON reports(assessment_id)",
+        # uploads table — created here so it always exists regardless of gis-loader
+        """
+        CREATE TABLE IF NOT EXISTS uploads (
+            id                    VARCHAR(20)   PRIMARY KEY,
+            original_filename     VARCHAR(500)  NOT NULL,
+            saved_path            VARCHAR(500)  NOT NULL,
+            file_type             VARCHAR(20)   NOT NULL,
+            mime_type             VARCHAR(100),
+            file_size_bytes       BIGINT,
+            lat                   FLOAT,
+            lon                   FLOAT,
+            geom                  GEOMETRY(Point, 4326),
+            location_source       VARCHAR(20)   DEFAULT 'device_gps',
+            gps_accuracy_m        FLOAT,
+            status                VARCHAR(20)   NOT NULL DEFAULT 'uploaded',
+            is_analyzed           BOOLEAN       NOT NULL DEFAULT FALSE,
+            duration_seconds      FLOAT,
+            frames_extracted      INTEGER,
+            is_georeferenced      BOOLEAN       DEFAULT FALSE,
+            cog_path              VARCHAR(500),
+            bounds_west           FLOAT,
+            bounds_south          FLOAT,
+            bounds_east           FLOAT,
+            bounds_north          FLOAT,
+            assessment_id         VARCHAR(20),
+            batch_id              VARCHAR(50),
+            parent_upload_id      VARCHAR(20),
+            error_message         TEXT,
+            retry_count           INTEGER       DEFAULT 0,
+            worker_name           VARCHAR(100),
+            field_note            TEXT,
+            uploaded_at           TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+            processing_started_at TIMESTAMPTZ,
+            processing_done_at    TIMESTAMPTZ,
+            updated_at            TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_uploads_geom ON uploads USING GIST(geom) WHERE geom IS NOT NULL",
+        "CREATE INDEX IF NOT EXISTS idx_uploads_status ON uploads(status)",
+        "CREATE INDEX IF NOT EXISTS idx_uploads_is_analyzed ON uploads(is_analyzed)",
+        "CREATE INDEX IF NOT EXISTS idx_uploads_file_type ON uploads(file_type)",
+        "CREATE INDEX IF NOT EXISTS idx_uploads_assessment_id ON uploads(assessment_id) WHERE assessment_id IS NOT NULL",
+        "CREATE INDEX IF NOT EXISTS idx_uploads_batch_id ON uploads(batch_id) WHERE batch_id IS NOT NULL",
+        "CREATE INDEX IF NOT EXISTS idx_uploads_parent_upload_id ON uploads(parent_upload_id) WHERE parent_upload_id IS NOT NULL",
+        "CREATE INDEX IF NOT EXISTS idx_uploads_worker ON uploads(worker_name)",
+        "CREATE INDEX IF NOT EXISTS idx_uploads_uploaded_at ON uploads(uploaded_at DESC)",
+        """
+        CREATE OR REPLACE FUNCTION update_upload_geom()
+        RETURNS TRIGGER AS $$
+        BEGIN
+          IF NEW.lat IS NOT NULL AND NEW.lon IS NOT NULL THEN
+            NEW.geom = ST_SetSRID(ST_MakePoint(NEW.lon, NEW.lat), 4326);
+          END IF;
+          NEW.updated_at = NOW();
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+        """,
+        """
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_trigger WHERE tgname = 'trigger_upload_geom'
+          ) THEN
+            CREATE TRIGGER trigger_upload_geom
+              BEFORE INSERT OR UPDATE ON uploads
+              FOR EACH ROW
+              EXECUTE FUNCTION update_upload_geom();
+          END IF;
+        END $$
+        """,
     ]
     async with pool.acquire() as conn:
         for sql in migrations:
