@@ -113,8 +113,8 @@ services:
         condition: service_healthy
       gis-loader:
         condition: service_completed_successfully
-      ollama:
-        condition: service_started
+      ollama-init:
+        condition: service_completed_successfully
       titiler:
         condition: service_started
       osrm:
