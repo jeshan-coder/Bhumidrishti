@@ -184,7 +184,7 @@ if ($DataPopulated) {
 
     Write-Host "  Downloading data zip (10-30 min)..."
     Set-Location $REPO_ROOT
-    & $PythonCmd -m gdown $GDRIVE_FILE_ID -O $DATA_ZIP --fuzzy
+    & $PythonCmd -m gdown $GDRIVE_FILE_ID -O $DATA_ZIP
 
     Write-Host "  Extracting archive..."
     if (Test-Path "C:\Program Files\7-Zip\7z.exe") {

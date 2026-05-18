@@ -205,12 +205,14 @@ if [ "$DATA_ALREADY_PRESENT" = false ]; then
 
   # ── Ensure gdown is available (use python -m gdown to avoid PATH issues) ──
   echo "  Installing gdown (Google Drive downloader)..."
-  $PYTHON_CMD -m pip install --quiet --user gdown
+  # Ubuntu 24.04+ (PEP 668) blocks pip install without --break-system-packages
+  $PYTHON_CMD -m pip install --quiet --user gdown 2>/dev/null || \
+    $PYTHON_CMD -m pip install --quiet --user --break-system-packages gdown
   export PATH="$HOME/.local/bin:$PATH"
   ok "gdown ready"
 
   echo "  Downloading data zip (this may take 10-30 min depending on connection speed)..."
-  $PYTHON_CMD -m gdown "${GDRIVE_FILE_ID}" -O "${REPO_ROOT}/${DATA_ZIP}" --fuzzy
+  $PYTHON_CMD -m gdown "${GDRIVE_FILE_ID}" -O "${REPO_ROOT}/${DATA_ZIP}"
 
   echo "  Extracting archive..."
   cd "${REPO_ROOT}"
