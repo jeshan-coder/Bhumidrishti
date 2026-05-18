@@ -66,20 +66,49 @@ def request_assessment_json_repair(
     system_prompt: str,
     raw_assistant_output: str,
 ) -> str:
-    """Request a strict JSON-only rewrite when the model returns prose instead of JSON."""
-    # This variable stores the strict repair instruction used to coerce valid JSON output.
-    repair_instruction = (
-        "The previous assistant output was not valid JSON. "
-        "Rewrite it as ONE valid JSON object only, with no markdown and no extra text.\n\n"
-        "Required keys: severity, damage_type, damage_description, structural_risk, "
-        "building_type, building_floors, building_material, estimated_occupants, occupant_status, "
-        "recommended_action, action_priority, flood_zone, elevation_m, slope_degrees, slope_risk, "
-        "nearest_shelter, shelter_distance_m, shelter_type, road_access, nearest_road, road_distance_m, "
-        "reasoning, warnings, confidence, turkish_summary.\n\n"
-        "Rules: severity must be 1-5, action_priority 1-5, confidence 0-1, warnings must be an array.\n\n"
-        "Previous output:\n"
-        f"{raw_assistant_output}"
-    )
+    """
+    Request a strict JSON-only rewrite when the model returns prose or nothing.
+
+    Two modes:
+    - Empty / whitespace-only output → ask the model to generate the JSON from
+      scratch (there is nothing to rewrite; sending an empty "Previous output"
+      causes Gemma to reply with a meta-message instead of JSON).
+    - Non-empty prose output → ask it to rewrite the existing text as JSON.
+    """
+    stripped = raw_assistant_output.strip()
+
+    if not stripped:
+        # Model returned nothing — generate fresh rather than "rewrite empty".
+        repair_instruction = (
+            "Your previous response was empty. "
+            "Output ONE valid JSON object only with no markdown and no extra text.\n\n"
+            "Required keys: severity (1-5 int), damage_type (string), damage_description (string), "
+            "structural_risk (string), building_type (string), building_floors (int or null), "
+            "building_material (string), estimated_occupants (int), occupant_status (string), "
+            "recommended_action (string), action_priority (1-5 int), flood_zone (string), "
+            "elevation_m (float or null), slope_degrees (float or null), slope_risk (string), "
+            "nearest_shelter (string or null), shelter_distance_m (float or null), "
+            "shelter_type (string or null), road_access (string), nearest_road (string or null), "
+            "road_distance_m (float or null), reasoning (string), warnings (array of strings), "
+            "confidence (0.0-1.0 float), turkish_summary (string).\n\n"
+            "Use the images already provided and your best judgment. "
+            "If uncertain, use severity=3, confidence=0.4, and note uncertainty in reasoning.\n\n"
+            'Output only the JSON object starting with { and ending with }.'
+        )
+    else:
+        # Model returned prose — ask it to rewrite as JSON.
+        repair_instruction = (
+            "The previous assistant output was not valid JSON. "
+            "Rewrite it as ONE valid JSON object only, with no markdown and no extra text.\n\n"
+            "Required keys: severity, damage_type, damage_description, structural_risk, "
+            "building_type, building_floors, building_material, estimated_occupants, occupant_status, "
+            "recommended_action, action_priority, flood_zone, elevation_m, slope_degrees, slope_risk, "
+            "nearest_shelter, shelter_distance_m, shelter_type, road_access, nearest_road, road_distance_m, "
+            "reasoning, warnings, confidence, turkish_summary.\n\n"
+            "Rules: severity must be 1-5, action_priority 1-5, confidence 0-1, warnings must be an array.\n\n"
+            "Previous output:\n"
+            f"{stripped}"
+        )
 
     repair_response = ollama.chat(
         model=model,
@@ -711,6 +740,21 @@ async def run_assessment_agent(
                 )
 
         raw_assistant_content = assistant_content or ""
+
+        # Log clearly when the model returns an empty response so it is easy
+        # to spot in logs.  The repair function handles this case differently
+        # (generates fresh JSON rather than trying to rewrite nothing).
+        if not raw_assistant_content.strip():
+            _log_agent_event(
+                "assessment_empty_response",
+                {
+                    "iteration": iteration,
+                    "done_reason": done_reason,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                },
+            )
+
         try:
             parsed_assessment = parse_assessment_json(raw_assistant_content)
         except ValueError as parse_exc:
@@ -719,6 +763,7 @@ async def run_assessment_agent(
                 {
                     "iteration": iteration,
                     "error": str(parse_exc),
+                    "empty_response": not raw_assistant_content.strip(),
                     "assistant_content_preview": raw_assistant_content[:500],
                 },
             )
@@ -728,7 +773,7 @@ async def run_assessment_agent(
                     {
                         "stage": "finalize_output",
                         "progress_percent": 86,
-                        "thought": "AI is converting response into strict JSON output.",
+                        "thought": "AI is retrying JSON output (previous response was empty or invalid).",
                     }
                 )
 

@@ -3,6 +3,7 @@
 from datetime import datetime
 from typing import Literal
 from pydantic import BaseModel, Field
+from services.ai_runtime import ACTIVE_GEMMA_MODEL
 
 
 AssessmentStatus = Literal["pending", "in_review", "responded", "closed", "false_positive"]
@@ -77,7 +78,7 @@ class Assessment(BaseModel):
     warnings: list[str] | None = None
     confidence: float | None = Field(None, ge=0.0, le=1.0)
     turkish_summary: str | None = None
-    model_used: str = "gemma4:26b"
+    model_used: str = ACTIVE_GEMMA_MODEL
     inference_seconds: float | None = None
     
     # Field worker info

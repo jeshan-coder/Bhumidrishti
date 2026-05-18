@@ -35,7 +35,8 @@ logger = logging.getLogger(__name__)
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 ollama_client = AsyncClient(host=OLLAMA_HOST)
-REPORT_MODEL = os.getenv("REPORT_MODEL") or os.getenv("GEMMA_MODEL", "gemma4:26b")
+from services.ai_runtime import ACTIVE_GEMMA_MODEL as _ACTIVE_MODEL  # noqa: E402
+REPORT_MODEL = os.getenv("REPORT_MODEL") or _ACTIVE_MODEL
 
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "/app/data/uploads")).resolve()
 REPORTS_DIR = UPLOAD_DIR / "reports"

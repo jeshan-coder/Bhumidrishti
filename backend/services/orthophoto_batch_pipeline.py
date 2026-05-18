@@ -1285,20 +1285,31 @@ async def get_batch_status(batch_id: str) -> dict[str, Any] | None:
 async def find_covering_upload(lat: float, lon: float) -> str | None:
     """
     Return upload_id of the most recent orthophoto upload whose bounding box
-    covers the given coordinate. Falls back to the most recent orthophoto
-    upload regardless of bounds if no exact spatial match is found.
+    contains the given WGS84 coordinate.
+
+    Two-pass strategy:
+    1. Fast DB check — use stored bounds_* columns.
+    2. Disk fallback — for raster uploads whose bounds were never written to the
+       DB (upload-time extraction failure), read them live from the COG/TIF file,
+       backfill the DB columns so the next call is fast, then check coverage.
+
+    Returns None only when genuinely no uploaded orthophoto covers the point.
     """
     pool = get_pool()
     if not pool:
         return None
+
     async with pool.acquire() as conn:
-        # First: try exact bounds match for any raster upload.
+        # ── Pass 1: stored bounds ────────────────────────────────────────────
         row = await conn.fetchrow(
             """
             SELECT id
               FROM uploads
              WHERE (cog_path IS NOT NULL OR saved_path LIKE '%.tif%' OR saved_path LIKE '%.tiff%')
-               AND bounds_west IS NOT NULL
+               AND bounds_west  IS NOT NULL
+               AND bounds_south IS NOT NULL
+               AND bounds_east  IS NOT NULL
+               AND bounds_north IS NOT NULL
                AND $1 BETWEEN bounds_south AND bounds_north
                AND $2 BETWEEN bounds_west  AND bounds_east
              ORDER BY uploaded_at DESC
@@ -1310,17 +1321,63 @@ async def find_covering_upload(lat: float, lon: float) -> str | None:
         if row:
             return str(row["id"])
 
-        # Fallback: most recent raster upload regardless of bounds or type.
-        row = await conn.fetchrow(
+        # ── Pass 2: raster uploads with no stored bounds ─────────────────────
+        # Bounds columns are NULL when extraction failed at upload time.
+        # Read them directly from the file, backfill the DB, then check.
+        candidates = await conn.fetch(
             """
-            SELECT id
+            SELECT id, cog_path, saved_path
               FROM uploads
-             WHERE cog_path IS NOT NULL
-                OR saved_path LIKE '%.tif%'
-                OR saved_path LIKE '%.tiff%'
-                OR file_type IN ('drone_orthophoto', 'orthophoto', 'raster')
+             WHERE (cog_path IS NOT NULL OR saved_path LIKE '%.tif%' OR saved_path LIKE '%.tiff%')
+               AND bounds_west IS NULL
              ORDER BY uploaded_at DESC
-             LIMIT 1
+             LIMIT 20
             """
         )
-    return str(row["id"]) if row else None
+
+    if not candidates:
+        return None
+
+    import rasterio  # noqa: PLC0415 — deferred to avoid import cost at startup
+    from rasterio.warp import transform_bounds as rio_transform_bounds  # noqa: PLC0415
+
+    for cand in candidates:
+        # Resolve the file path — prefer cog_path, fall back to saved_path.
+        rel = cand["cog_path"] or cand["saved_path"]
+        if not rel:
+            continue
+        abs_path = str(UPLOAD_ROOT.parent / rel)
+        if not os.path.exists(abs_path):
+            continue
+        try:
+            with rasterio.open(abs_path) as ds:
+                west, south, east, north = rio_transform_bounds(
+                    ds.crs, "EPSG:4326", *ds.bounds
+                )
+        except Exception as exc:
+            logger.warning("find_covering_upload.raster_read_failed id=%s err=%s", cand["id"], exc)
+            continue
+
+        # Backfill the DB so the next call hits Pass 1 directly.
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE uploads
+                   SET bounds_west  = $1,
+                       bounds_south = $2,
+                       bounds_east  = $3,
+                       bounds_north = $4
+                 WHERE id = $5
+                """,
+                float(west), float(south), float(east), float(north),
+                cand["id"],
+            )
+
+        if south <= lat <= north and west <= lon <= east:
+            logger.info(
+                "find_covering_upload.bounds_backfilled id=%s bounds=[%.4f,%.4f,%.4f,%.4f]",
+                cand["id"], west, south, east, north,
+            )
+            return str(cand["id"])
+
+    return None

@@ -2407,13 +2407,13 @@ export function FieldMapView() {
         setBatchDone(false)
         setBatchWasStopped(false)
         setBatchTokensUsed(0)
-        setBatchProgress({
-          total: Math.max(0, Number(status.total_buildings) || 0),
-          processed: Math.max(0, Number(status.processed) || 0),
-          failed: Math.max(0, Number(status.failed) || 0),
-          skipped: Math.max(0, Number(status.skipped) || 0),
-          events: [],
-        })
+        setBatchProgress((prev) => ({
+          ...(prev ?? { events: [] }),
+          total:     Math.max(prev?.total     ?? 0, Math.max(0, Number(status.total_buildings) || 0)),
+          processed: Math.max(prev?.processed ?? 0, Math.max(0, Number(status.processed) || 0)),
+          failed:    Math.max(prev?.failed    ?? 0, Math.max(0, Number(status.failed) || 0)),
+          skipped:   Math.max(prev?.skipped   ?? 0, Math.max(0, Number(status.skipped) || 0)),
+        }))
         setCurrentAiStage({
           osm_id: 0,
           stage: "reconnected",
@@ -2660,12 +2660,18 @@ export function FieldMapView() {
         if (!isMounted) return
         setBatchProgress((prev) => {
           const base = prev ?? { total: 0, processed: 0, failed: 0, skipped: 0, events: [] }
+          const dbTotal     = Math.max(0, Number(status.total_buildings) || 0)
+          const dbProcessed = Math.max(0, Number(status.processed) || 0)
+          const dbFailed    = Math.max(0, Number(status.failed) || 0)
+          const dbSkipped   = Math.max(0, Number(status.skipped) || 0)
+          // Use Math.max so a stale or early DB read never rolls back values
+          // that the SSE stream has already advanced forward.
           return {
             ...base,
-            total: Math.max(0, Number(status.total_buildings) || 0),
-            processed: Math.max(0, Number(status.processed) || 0),
-            failed: Math.max(0, Number(status.failed) || 0),
-            skipped: Math.max(0, Number(status.skipped) || 0),
+            total:     Math.max(base.total,     dbTotal),
+            processed: Math.max(base.processed, dbProcessed),
+            failed:    Math.max(base.failed,     dbFailed),
+            skipped:   Math.max(base.skipped,    dbSkipped),
           }
         })
         if (String(status.status || "").toLowerCase() === "complete") {
@@ -2677,10 +2683,13 @@ export function FieldMapView() {
         // Silent fallback; SSE may still be working.
       }
     }
-    void syncStatus()
-    const timer = window.setInterval(() => { void syncStatus() }, 3000)
+    // Delay the first poll by 1 s so the SSE stream can establish its baseline
+    // before we risk overwriting it with a stale DB snapshot.
+    const firstPoll = window.setTimeout(() => { void syncStatus() }, 1000)
+    const timer     = window.setInterval(() => { void syncStatus() }, 3000)
     return () => {
       isMounted = false
+      window.clearTimeout(firstPoll)
       window.clearInterval(timer)
     }
   }, [activeBatchId, batchDone])
@@ -3858,15 +3867,18 @@ export function FieldMapView() {
             <div className="space-y-3 px-4 py-4">
               <div>
                 <label className="mb-1 block text-xs font-semibold text-[#17352b]">
-                  Post-earthquake Upload ID (optional)
+                  Post-earthquake Upload ID <span className="font-normal text-zinc-400">(optional)</span>
                 </label>
                 <input
                   type="text"
                   value={batchUploadId}
                   onChange={(e) => setBatchUploadId(e.target.value)}
-                  placeholder="Auto-detect if left empty"
+                  placeholder="Auto-detect by location if empty"
                   className="w-full rounded-md border border-[#D3D1C7] px-3 py-2 text-sm text-[#17352b] focus:outline-none focus:ring-2 focus:ring-[#0F6E56]"
                 />
+                <p className="mt-1 text-[10px] text-zinc-400">
+                  Leave empty to auto-detect. If all buildings are skipped with &quot;no coverage&quot;, paste the upload ID from the Data panel here.
+                </p>
               </div>
 
               {/* Site picker */}

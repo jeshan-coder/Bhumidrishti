@@ -94,7 +94,11 @@ export async function startOrthophotoBatch(
     body: JSON.stringify(req),
   })
   const json = await res.json()
-  if (!json.success) throw new Error(json.error || "Failed to start batch")
+  // Handle both our {success, error} envelope and FastAPI's raw {detail} errors.
+  if (!json.success) {
+    const msg = json.error ?? json.detail ?? "Failed to start batch"
+    throw new Error(String(msg))
+  }
   return json.data
 }
 

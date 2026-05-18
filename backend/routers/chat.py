@@ -12,7 +12,7 @@ from ollama import AsyncClient
 from db.postgres import get_pool
 from models.chat import ChatRequest, ChatResponseData
 from prompts.base_system_prompt import build_bhumidrishti_system_prompt
-from services.ai_runtime import ACTIVE_GEMMA_MODEL
+from services.ai_runtime import ACTIVE_GEMMA_MODEL, get_model_context_window
 from services.gemma_pipeline import CHAT_TOOLS, dispatch_tool
 from services.tools import resolve_tool_name, parse_colon_tool_call
 
@@ -181,7 +181,7 @@ async def chat_with_gemma_stream(payload: ChatRequest) -> StreamingResponse:
                     "messages": messages,
                     "options": {
                         "temperature": payload.temperature,
-                        "num_ctx": 32768,   # explicit context window; prevents KV-cache bleed from prior sessions
+                        "num_ctx": get_model_context_window(MODEL_NAME),  # model-aware context window
                     },
                     "stream": True,
                 }
