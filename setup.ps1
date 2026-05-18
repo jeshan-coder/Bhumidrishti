@@ -128,16 +128,66 @@ $DataPopulated = (Test-Path "$REPO_ROOT\data\turkey_data\Adiyaman") -and
 if ($DataPopulated) {
     Write-Ok "Data directory already populated - skipping download."
 } else {
-    if (-not (Get-Command gdown -ErrorAction SilentlyContinue)) {
-        Write-Host "  Installing gdown..."
-        if (Get-Command pip3 -ErrorAction SilentlyContinue) {
-            pip3 install --quiet gdown
-        } elseif (Get-Command pip -ErrorAction SilentlyContinue) {
-            pip install --quiet gdown
+    # ---- Ensure Python is available ----
+    $PythonCmd = $null
+    if (Get-Command python3 -ErrorAction SilentlyContinue) {
+        $PythonCmd = "python3"
+    } elseif (Get-Command python -ErrorAction SilentlyContinue) {
+        $PythonCmd = "python"
+    }
+
+    if (-not $PythonCmd) {
+        Write-Warn "Python not found. Installing Python 3 automatically..."
+
+        # Try winget first (available on Windows 10 1709+ / Windows 11)
+        if (Get-Command winget -ErrorAction SilentlyContinue) {
+            Write-Host "  Using winget to install Python 3..."
+            winget install --id Python.Python.3.12 --silent --accept-package-agreements --accept-source-agreements
+            # Refresh PATH so python is visible in this session
+            $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH", "User")
         } else {
-            Write-Fail "pip not found. Install Python 3 from https://www.python.org/downloads/"
+            # Fallback: download the official Python installer
+            Write-Host "  Downloading Python 3.12 installer (~25 MB)..."
+            $pyInstaller = "$env:TEMP\python-3.12-installer.exe"
+            Invoke-WebRequest -Uri "https://www.python.org/ftp/python/3.12.0/python-3.12.0-amd64.exe" `
+                              -OutFile $pyInstaller -UseBasicParsing
+            Write-Host "  Running Python installer (silent)..."
+            Start-Process -FilePath $pyInstaller -ArgumentList "/quiet InstallAllUsers=0 PrependPath=1 Include_test=0" -Wait
+            Remove-Item $pyInstaller -Force
+            # Refresh PATH
+            $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH", "User")
+        }
+
+        # Verify
+        if (Get-Command python -ErrorAction SilentlyContinue) {
+            $PythonCmd = "python"
+            Write-Ok "Python installed successfully."
+        } elseif (Get-Command python3 -ErrorAction SilentlyContinue) {
+            $PythonCmd = "python3"
+            Write-Ok "Python installed successfully."
+        } else {
+            Write-Fail "Python installation failed."
+            Write-Host "  Please install Python 3 manually: https://www.python.org/downloads/"
+            Write-Host "  Make sure to check 'Add Python to PATH' during installation."
+            Write-Host "  Then re-run this script."
             exit 1
         }
+    } else {
+        $pyVersion = (& $PythonCmd --version 2>&1)
+        Write-Ok "Python found: $pyVersion"
+    }
+
+    # ---- Ensure gdown is available ----
+    if (-not (Get-Command gdown -ErrorAction SilentlyContinue)) {
+        Write-Host "  Installing gdown..."
+        & $PythonCmd -m pip install --quiet gdown
+        # Refresh PATH so gdown script is visible
+        $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH", "User")
+        # Also check local Scripts folder (pip --user installs here)
+        $localScripts = "$env:APPDATA\Python\Python312\Scripts"
+        if (Test-Path $localScripts) { $env:PATH += ";$localScripts" }
+        $localScripts2 = "$env:LOCALAPPDATA\Programs\Python\Python312\Scripts"
+        if (Test-Path $localScripts2) { $env:PATH += ";$localScripts2" }
     }
     Write-Ok "gdown ready"
 
