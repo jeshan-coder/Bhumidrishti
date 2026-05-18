@@ -231,19 +231,26 @@ if [ "$DATA_EXTRACTED" = false ]; then
   fi
 
   # ── Extract ───────────────────────────────────────────────────────────────
-  echo "  Extracting archive (this may take a few minutes)..."
+  echo "  Extracting archive — this may take several minutes for 10 GB..."
   cd "${REPO_ROOT}"
 
-  # Detect whether zip has a top-level data/ folder or not
-  FIRST_ENTRY=$(unzip -Z1 "${ZIP_PATH}" 2>/dev/null | head -1)
+  # Detect top-level structure without triggering pipefail on SIGPIPE
+  # (head -1 closes the pipe early; unzip gets SIGPIPE exit 141 which
+  #  pipefail would treat as a script error — so we disable pipefail here)
+  set +o pipefail
+  FIRST_ENTRY=$(unzip -Z1 "${ZIP_PATH}" 2>/dev/null | head -1 || true)
+  set -o pipefail
+
   if [[ "$FIRST_ENTRY" == data/* ]]; then
-    unzip -q -o "${ZIP_PATH}" -d "${REPO_ROOT}"
+    echo "  (zip contains data/ at top level — extracting to repo root)"
+    unzip -o "${ZIP_PATH}" -d "${REPO_ROOT}"
   else
+    echo "  (extracting into data/ folder)"
     mkdir -p "${REPO_ROOT}/data"
-    unzip -q -o "${ZIP_PATH}" -d "${REPO_ROOT}/data"
+    unzip -o "${ZIP_PATH}" -d "${REPO_ROOT}/data"
   fi
 
-  # Keep the zip — do NOT delete it so re-runs can reuse it
+  # Keep the zip — do NOT delete it so re-runs can reuse it without re-downloading
   ok "Data extracted. Zip kept at: ${DATA_ZIP}"
 fi
 
