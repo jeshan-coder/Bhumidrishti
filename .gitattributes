@@ -1,0 +1,33 @@
+# Force LF line endings for all shell scripts and text files
+# so they work inside Linux Docker containers even when
+# checked out on Windows (which defaults to CRLF).
+
+*.sh        text eol=lf
+*.bash      text eol=lf
+*.py        text eol=lf
+*.ts        text eol=lf
+*.tsx       text eol=lf
+*.js        text eol=lf
+*.jsx       text eol=lf
+*.json      text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.sql       text eol=lf
+*.md        text eol=lf
+*.txt       text eol=lf
+*.env       text eol=lf
+*.example   text eol=lf
+Dockerfile  text eol=lf
+
+# Binary files — no line ending conversion
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.woff binary
+*.woff2 binary
+*.tif  binary
+*.tiff binary
+*.zip  binary
+*.gz   binary
