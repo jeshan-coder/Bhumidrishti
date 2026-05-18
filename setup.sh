@@ -355,34 +355,52 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 8 — Launch
+# STEP 8 — Pull images one-by-one, build, then launch
+# Pulling in parallel (docker compose up --build) fails on slow/flaky
+# connections because one dropped layer aborts ALL concurrent pulls.
+# Pulling sequentially lets each image retry independently.
 # ─────────────────────────────────────────────────────────────────────────────
 step 8 "Starting BhumiDrishti..."
 
 cd "${REPO_ROOT}"
 
-# Retry up to 3 times — Docker image pulls can fail with EOF on flaky networks
-MAX_RETRIES=3
-RETRY_DELAY=5
-for attempt in $(seq 1 $MAX_RETRIES); do
-  echo "  docker compose up --build -d  (attempt $attempt / $MAX_RETRIES)..."
-  if $COMPOSE_CMD up --build -d; then
-    break
-  fi
-  if [ "$attempt" -eq "$MAX_RETRIES" ]; then
-    fail "docker compose up failed after $MAX_RETRIES attempts."
-    echo ""
-    echo "  Common causes:"
-    echo "    - Network dropped mid-pull (EOF) — just re-run ./setup.sh"
-    echo "    - Docker Hub rate limit — wait a few minutes and retry"
-    echo "    - Docker daemon not running — run: sudo service docker start"
-    echo ""
-    echo "  To retry manually:  docker compose up --build -d"
-    exit 1
-  fi
-  warn "Attempt $attempt failed. Retrying in ${RETRY_DELAY}s..."
-  sleep $RETRY_DELAY
-done
+pull_image() {
+  local image="$1"
+  local max=5
+  for attempt in $(seq 1 $max); do
+    echo "  Pulling $image (attempt $attempt/$max)..."
+    if docker pull "$image"; then
+      ok "Pulled: $image"
+      return 0
+    fi
+    if [ "$attempt" -lt "$max" ]; then
+      warn "Pull failed. Retrying in 10s..."
+      sleep 10
+    fi
+  done
+  fail "Could not pull $image after $max attempts."
+  echo "  Check your internet connection and re-run ./setup.sh"
+  exit 1
+}
+
+# Pull all pre-built images one at a time
+echo ""
+echo "  Pulling Docker images one-by-one (avoids parallel download failures)..."
+pull_image "postgis/postgis:16-3.4"
+pull_image "ollama/ollama:latest"
+pull_image "osrm/osrm-backend"
+pull_image "ghcr.io/developmentseed/titiler:latest"
+pull_image "maptiler/tileserver-gl:latest"
+
+# Build local images (backend, frontend, gis-loader)
+echo ""
+echo "  Building local images..."
+$COMPOSE_CMD build
+
+# Launch everything (no re-pull needed — images already present)
+echo ""
+echo "  Launching all services..."
+$COMPOSE_CMD up -d
 
 echo ""
 echo -e "${GREEN}${BOLD}╔══════════════════════════════════════════════════════╗${NC}"
