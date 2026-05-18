@@ -18,6 +18,7 @@ RUN apt-get update && apt-get install -y \
     libffi-dev \
     libglib2.0-0 \
     fonts-liberation \
+    dos2unix \
     && rm -rf /var/lib/apt/lists/*
 
 # Set env vars for GDAL
@@ -28,5 +29,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
+
+# Strip Windows CRLF from all shell scripts (safety net for Windows checkouts)
+RUN find /app -name "*.sh" -exec dos2unix {} \;
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
