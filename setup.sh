@@ -136,16 +136,59 @@ if [ -d "${REPO_ROOT}/data/turkey_data/Adiyaman" ] && \
 fi
 
 if [ "$DATA_ALREADY_PRESENT" = false ]; then
-  if ! command -v gdown &>/dev/null; then
-    echo "  Installing gdown (Google Drive downloader)..."
-    if command -v pip3 &>/dev/null; then
-      pip3 install --quiet --user gdown
-    elif command -v pip &>/dev/null; then
-      pip install --quiet --user gdown
+  # ── Ensure Python is available ────────────────────────────────────────────
+  PYTHON_CMD=""
+  if command -v python3 &>/dev/null; then
+    PYTHON_CMD="python3"
+  elif command -v python &>/dev/null; then
+    PYTHON_CMD="python"
+  fi
+
+  if [ -z "$PYTHON_CMD" ]; then
+    warn "Python not found. Installing Python 3 automatically..."
+
+    if command -v apt-get &>/dev/null; then
+      # Debian / Ubuntu
+      sudo apt-get update -qq && sudo apt-get install -y -qq python3 python3-pip
+    elif command -v dnf &>/dev/null; then
+      # Fedora / RHEL / Rocky
+      sudo dnf install -y python3 python3-pip
+    elif command -v yum &>/dev/null; then
+      # CentOS / older RHEL
+      sudo yum install -y python3 python3-pip
+    elif command -v pacman &>/dev/null; then
+      # Arch
+      sudo pacman -Sy --noconfirm python python-pip
+    elif command -v brew &>/dev/null; then
+      # macOS Homebrew
+      brew install python3
     else
-      fail "pip / pip3 not found. Install Python 3 first: https://www.python.org/downloads/"
+      fail "Cannot auto-install Python: no known package manager found."
+      echo "  Please install Python 3 manually: https://www.python.org/downloads/"
+      echo "  Then re-run this script."
       exit 1
     fi
+
+    # Re-check
+    if command -v python3 &>/dev/null; then
+      PYTHON_CMD="python3"
+      ok "Python installed: $(python3 --version)"
+    elif command -v python &>/dev/null; then
+      PYTHON_CMD="python"
+      ok "Python installed: $(python --version)"
+    else
+      fail "Python installation failed."
+      echo "  Please install Python 3 manually: https://www.python.org/downloads/"
+      exit 1
+    fi
+  else
+    ok "Python found: $($PYTHON_CMD --version)"
+  fi
+
+  # ── Ensure gdown is available ──────────────────────────────────────────────
+  if ! command -v gdown &>/dev/null; then
+    echo "  Installing gdown (Google Drive downloader)..."
+    $PYTHON_CMD -m pip install --quiet --user gdown
     export PATH="$HOME/.local/bin:$PATH"
   fi
   ok "gdown ready"
