@@ -360,7 +360,29 @@ fi
 step 8 "Starting BhumiDrishti..."
 
 cd "${REPO_ROOT}"
-$COMPOSE_CMD up --build -d
+
+# Retry up to 3 times — Docker image pulls can fail with EOF on flaky networks
+MAX_RETRIES=3
+RETRY_DELAY=5
+for attempt in $(seq 1 $MAX_RETRIES); do
+  echo "  docker compose up --build -d  (attempt $attempt / $MAX_RETRIES)..."
+  if $COMPOSE_CMD up --build -d; then
+    break
+  fi
+  if [ "$attempt" -eq "$MAX_RETRIES" ]; then
+    fail "docker compose up failed after $MAX_RETRIES attempts."
+    echo ""
+    echo "  Common causes:"
+    echo "    - Network dropped mid-pull (EOF) — just re-run ./setup.sh"
+    echo "    - Docker Hub rate limit — wait a few minutes and retry"
+    echo "    - Docker daemon not running — run: sudo service docker start"
+    echo ""
+    echo "  To retry manually:  docker compose up --build -d"
+    exit 1
+  fi
+  warn "Attempt $attempt failed. Retrying in ${RETRY_DELAY}s..."
+  sleep $RETRY_DELAY
+done
 
 echo ""
 echo -e "${GREEN}${BOLD}╔══════════════════════════════════════════════════════╗${NC}"
