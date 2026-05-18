@@ -177,23 +177,14 @@ if ($DataPopulated) {
         Write-Ok "Python found: $pyVersion"
     }
 
-    # ---- Ensure gdown is available ----
-    if (-not (Get-Command gdown -ErrorAction SilentlyContinue)) {
-        Write-Host "  Installing gdown..."
-        & $PythonCmd -m pip install --quiet gdown
-        # Refresh PATH so gdown script is visible
-        $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH", "User")
-        # Also check local Scripts folder (pip --user installs here)
-        $localScripts = "$env:APPDATA\Python\Python312\Scripts"
-        if (Test-Path $localScripts) { $env:PATH += ";$localScripts" }
-        $localScripts2 = "$env:LOCALAPPDATA\Programs\Python\Python312\Scripts"
-        if (Test-Path $localScripts2) { $env:PATH += ";$localScripts2" }
-    }
+    # ---- Ensure gdown is available (always run via python -m gdown to avoid PATH issues) ----
+    Write-Host "  Installing gdown..."
+    & $PythonCmd -m pip install --quiet gdown
     Write-Ok "gdown ready"
 
     Write-Host "  Downloading data zip (10-30 min)..."
     Set-Location $REPO_ROOT
-    gdown $GDRIVE_FILE_ID -O $DATA_ZIP --fuzzy
+    & $PythonCmd -m gdown $GDRIVE_FILE_ID -O $DATA_ZIP --fuzzy
 
     Write-Host "  Extracting archive..."
     if (Test-Path "C:\Program Files\7-Zip\7z.exe") {

@@ -185,16 +185,32 @@ if [ "$DATA_ALREADY_PRESENT" = false ]; then
     ok "Python found: $($PYTHON_CMD --version)"
   fi
 
-  # ── Ensure gdown is available ──────────────────────────────────────────────
-  if ! command -v gdown &>/dev/null; then
-    echo "  Installing gdown (Google Drive downloader)..."
-    $PYTHON_CMD -m pip install --quiet --user gdown
-    export PATH="$HOME/.local/bin:$PATH"
+  # ── Ensure pip is available ───────────────────────────────────────────────
+  if ! $PYTHON_CMD -m pip --version &>/dev/null 2>&1; then
+    warn "pip not found. Installing pip..."
+    if command -v apt-get &>/dev/null; then
+      sudo apt-get install -y -qq python3-pip
+    elif command -v dnf &>/dev/null; then
+      sudo dnf install -y python3-pip
+    elif command -v yum &>/dev/null; then
+      sudo yum install -y python3-pip
+    elif command -v pacman &>/dev/null; then
+      sudo pacman -Sy --noconfirm python-pip
+    else
+      # Universal fallback via ensurepip / get-pip.py
+      $PYTHON_CMD -m ensurepip --upgrade 2>/dev/null || \
+        curl -sSL https://bootstrap.pypa.io/get-pip.py | $PYTHON_CMD
+    fi
   fi
+
+  # ── Ensure gdown is available (use python -m gdown to avoid PATH issues) ──
+  echo "  Installing gdown (Google Drive downloader)..."
+  $PYTHON_CMD -m pip install --quiet --user gdown
+  export PATH="$HOME/.local/bin:$PATH"
   ok "gdown ready"
 
-  echo "  Downloading data zip (this may take 10–30 min depending on connection speed)..."
-  gdown "${GDRIVE_FILE_ID}" -O "${REPO_ROOT}/${DATA_ZIP}" --fuzzy
+  echo "  Downloading data zip (this may take 10-30 min depending on connection speed)..."
+  $PYTHON_CMD -m gdown "${GDRIVE_FILE_ID}" -O "${REPO_ROOT}/${DATA_ZIP}" --fuzzy
 
   echo "  Extracting archive..."
   cd "${REPO_ROOT}"
