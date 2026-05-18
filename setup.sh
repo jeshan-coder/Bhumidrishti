@@ -355,10 +355,9 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 8 — Pull images one-by-one, build, then launch
-# Pulling in parallel (docker compose up --build) fails on slow/flaky
-# connections because one dropped layer aborts ALL concurrent pulls.
-# Pulling sequentially lets each image retry independently.
+# STEP 8 — Launch
+# Strategy: try fast parallel pull first; if it fails fall back to
+# pulling each image one-by-one with retries, then build and launch.
 # ─────────────────────────────────────────────────────────────────────────────
 step 8 "Starting BhumiDrishti..."
 
@@ -368,39 +367,41 @@ pull_image() {
   local image="$1"
   local max=5
   for attempt in $(seq 1 $max); do
-    echo "  Pulling $image (attempt $attempt/$max)..."
+    echo "    Pulling $image (attempt $attempt/$max)..."
     if docker pull "$image"; then
       ok "Pulled: $image"
       return 0
     fi
     if [ "$attempt" -lt "$max" ]; then
-      warn "Pull failed. Retrying in 10s..."
+      warn "Failed. Retrying in 10s..."
       sleep 10
     fi
   done
-  fail "Could not pull $image after $max attempts."
-  echo "  Check your internet connection and re-run ./setup.sh"
+  fail "Could not pull $image after $max attempts. Check your connection and re-run ./setup.sh"
   exit 1
 }
 
-# Pull all pre-built images one at a time
-echo ""
-echo "  Pulling Docker images one-by-one (avoids parallel download failures)..."
-pull_image "postgis/postgis:16-3.4"
-pull_image "ollama/ollama:latest"
-pull_image "osrm/osrm-backend"
-pull_image "ghcr.io/developmentseed/titiler:latest"
-pull_image "maptiler/tileserver-gl:latest"
+# Fast path: try parallel pull + build in one shot
+echo "  Trying fast parallel pull..."
+if $COMPOSE_CMD up --build -d; then
+  ok "All services started."
+else
+  warn "Parallel pull failed (likely a flaky connection). Switching to sequential pull..."
+  echo ""
 
-# Build local images (backend, frontend, gis-loader)
-echo ""
-echo "  Building local images..."
-$COMPOSE_CMD build
+  pull_image "postgis/postgis:16-3.4"
+  pull_image "ollama/ollama:latest"
+  pull_image "osrm/osrm-backend"
+  pull_image "ghcr.io/developmentseed/titiler:latest"
+  pull_image "maptiler/tileserver-gl:latest"
 
-# Launch everything (no re-pull needed — images already present)
-echo ""
-echo "  Launching all services..."
-$COMPOSE_CMD up -d
+  echo ""
+  echo "  Building local images (backend, frontend, gis-loader)..."
+  $COMPOSE_CMD build
+
+  echo "  Launching all services..."
+  $COMPOSE_CMD up -d
+fi
 
 echo ""
 echo -e "${GREEN}${BOLD}╔══════════════════════════════════════════════════════╗${NC}"
