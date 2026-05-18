@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="240" viewBox="0 0 640 240">
+  <title>BhumiDrishti Logo</title>
+  <desc>BhumiDrishti — offline disaster damage assessment tool. Circular map pin mark with terrain contour lines and central eye, alongside wordmark.</desc>
+
+  <!-- Light background version -->
+  <rect width="640" height="240" fill="#ffffff" rx="16"/>
+
+  <!-- Icon mark — centered at 90,120 -->
+  <g transform="translate(44, 52)">
+    <!-- Outer ring -->
+    <circle cx="92" cy="80" r="68" fill="#0F6E56"/>
+    <!-- Inner fill -->
+    <circle cx="92" cy="80" r="56" fill="#1D9E75"/>
+
+    <!-- Topographic contour lines -->
+    <path d="M36 80 Q54 56 92 52 Q130 56 148 80" fill="none" stroke="#9FE1CB" stroke-width="2.4" opacity="0.7"/>
+    <path d="M28 80 Q48 44 92 38 Q136 44 156 80" fill="none" stroke="#9FE1CB" stroke-width="1.6" opacity="0.4"/>
+    <path d="M40 94 Q60 76 92 72 Q124 76 144 94" fill="none" stroke="#9FE1CB" stroke-width="2.0" opacity="0.5"/>
+    <path d="M44 108 Q64 92 92 88 Q120 92 140 108" fill="none" stroke="#9FE1CB" stroke-width="1.6" opacity="0.35"/>
+
+    <!-- Eye outer -->
+    <circle cx="92" cy="80" r="22" fill="#085041"/>
+    <!-- Eye iris -->
+    <circle cx="92" cy="80" r="14" fill="#E1F5EE"/>
+    <!-- Eye pupil -->
+    <circle cx="92" cy="80" r="7" fill="#0F6E56"/>
+    <!-- Eye highlight -->
+    <circle cx="87" cy="75" r="2.5" fill="#9FE1CB" opacity="0.9"/>
+
+    <!-- Pin drop -->
+    <path d="M92 148 L80 124 Q92 116 104 124 Z" fill="#0F6E56"/>
+    <path d="M92 148 L82 126 Q92 120 102 126 Z" fill="#085041" opacity="0.5"/>
+
+    <!-- Tick marks top -->
+    <line x1="60" y1="36" x2="68" y2="50" stroke="#9FE1CB" stroke-width="1.6" opacity="0.5"/>
+    <line x1="92" y1="28" x2="92" y2="44" stroke="#9FE1CB" stroke-width="1.6" opacity="0.5"/>
+    <line x1="124" y1="36" x2="116" y2="50" stroke="#9FE1CB" stroke-width="1.6" opacity="0.5"/>
+  </g>
+
+  <!-- Wordmark -->
+  <g transform="translate(216, 68)">
+    <!-- BhumiDrishti -->
+    <text x="0" y="56" font-family="Georgia, serif" font-size="52" font-weight="700" fill="#1c1c1a" letter-spacing="-1">Bhumi</text>
+    <text x="186" y="56" font-family="Georgia, serif" font-size="52" font-weight="300" fill="#0F6E56" letter-spacing="-1">Drishti</text>
+
+    <!-- Divider -->
+    <line x1="0" y1="68" x2="385" y2="68" stroke="#D3D1C7" stroke-width="1"/>
+
+    <!-- Devanagari + tagline -->
+    <text x="0" y="96" font-family="Georgia, serif" font-size="24" fill="#444441" letter-spacing="2">भूमिदृष्टि</text>
+    <text x="175" y="96" font-family="Arial, Helvetica, sans-serif" font-size="18" fill="#888780" letter-spacing="4">GROUND VISION</text>
+  </g>
+</svg>

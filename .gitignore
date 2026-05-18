@@ -1,0 +1,50 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# AI editor / IDE config (local only)
+.claude/
+.cursor/
+.windsurf/
+
+# Environment files
+.env
+.env.*
+!.env.example
+!backend/.env
+frontend/.env*
+
+# Node / Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+backend/__pycache__/
+backend/**/__pycache__/
+backend/.pytest_cache/
+backend/.mypy_cache/
+backend/.ruff_cache/
+backend/.venv/
+
+# Logs
+*.log
+
+# Docker / local volumes
+postgres_data/
+ollama_data/
+
+# Project data (large/local GIS assets)
+/data/
+
+uploads/
+
+# Downloaded zip files (large, never commit)
+*.zip
+*.tar.gz
+*.tar.bz2
