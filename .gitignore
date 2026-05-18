@@ -15,6 +15,7 @@ Thumbs.db
 !.env.example
 !backend/.env
 frontend/.env*
+!frontend/.env.local.example
 
 # Node / Next.js
 frontend/node_modules/

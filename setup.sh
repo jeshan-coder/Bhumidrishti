@@ -115,8 +115,14 @@ else
 fi
 
 if [ ! -f "${REPO_ROOT}/frontend/.env.local" ]; then
-  cp "${REPO_ROOT}/frontend/.env.local.example" "${REPO_ROOT}/frontend/.env.local"
-  ok "Created frontend/.env.local from example"
+  if [ -f "${REPO_ROOT}/frontend/.env.local.example" ]; then
+    cp "${REPO_ROOT}/frontend/.env.local.example" "${REPO_ROOT}/frontend/.env.local"
+    ok "Created frontend/.env.local from example"
+  else
+    warn "frontend/.env.local.example not found — creating minimal .env.local"
+    echo "NEXT_PUBLIC_BACKEND_URL=http://localhost:8000" > "${REPO_ROOT}/frontend/.env.local"
+    ok "Created frontend/.env.local with default backend URL"
+  fi
 else
   ok "frontend/.env.local already exists — skipping"
 fi
